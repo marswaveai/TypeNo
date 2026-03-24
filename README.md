@@ -3,7 +3,10 @@
 ![TypeNo hero image](assets/hero.webp)
 
 > A free, open source, privacy-first voice input tool for macOS.
-> Press Control, speak, done.
+> 免费、开源、隐私优先的 macOS 语音输入工具。
+
+Press Control, speak, done.
+按下 Control，说话，完成。
 
 A minimal macOS voice input app. Press Control, speak, done.
 
@@ -40,12 +43,14 @@ Current releases are not yet notarized by Apple, so macOS may block the app afte
 Try these steps in order:
 
 1. Right-click `TypeNo.app` in Finder and choose **Open**
-2. If that still fails, go to **System Settings → Privacy & Security** and click **Open Anyway**
-3. If macOS still says the app is damaged, remove the quarantine flag in Terminal:
+2. If macOS still blocks it, remove the quarantine flag in Terminal:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/TypeNo.app"
 ```
+
+3. Open `TypeNo.app` again
+4. If you do see **System Settings → Privacy & Security → Open Anyway**, you can also use that path, but it may not appear on all systems
 
 TypeNo will support proper Apple code signing and notarization in a future release.
 
