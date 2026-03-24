@@ -113,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startRecording() {
         // Only check permissions if not previously granted this session
         if !permissionsGranted {
-            let missing = PermissionManager.missingPermissions(requestMicrophoneIfNeeded: true)
+            let missing = PermissionManager.missingPermissions(requestMicrophoneIfNeeded: true, requestAccessibilityIfNeeded: true)
             if !missing.isEmpty {
                 appState.showPermissions(missing)
                 return
@@ -129,13 +129,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopRecording() {
-        do {
-            try appState.stopRecording()
-            Task { @MainActor in
+        Task { @MainActor in
+            do {
+                try await appState.stopRecording()
                 await appState.transcribeAndInsert()
+            } catch is CancellationError {
+                // User canceled; keep app in reset state
+            } catch {
+                appState.showError(error.localizedDescription)
             }
-        } catch {
-            appState.showError(error.localizedDescription)
         }
     }
 
@@ -255,14 +257,12 @@ final class AppState: ObservableObject {
         onOverlayRequest?(true)
     }
 
-    func stopRecording() throws {
-        guard let url = recorder.stop() else {
-            throw TypeNoError.noRecording
-        }
-
-        currentRecordingURL = url
+    func stopRecording() async throws {
         phase = .transcribing
         onOverlayRequest?(true)
+
+        let url = try await recorder.stop()
+        currentRecordingURL = url
     }
 
     func cancel() {
@@ -421,7 +421,7 @@ enum TypeNoError: LocalizedError {
 // MARK: - Permission Manager
 
 enum PermissionManager {
-    static func missingPermissions(requestMicrophoneIfNeeded: Bool) -> Set<PermissionKind> {
+    static func missingPermissions(requestMicrophoneIfNeeded: Bool, requestAccessibilityIfNeeded: Bool = false) -> Set<PermissionKind> {
         var missing = Set<PermissionKind>()
 
         switch microphoneStatus(requestIfNeeded: requestMicrophoneIfNeeded) {
@@ -431,7 +431,7 @@ enum PermissionManager {
             missing.insert(.microphone)
         }
 
-        if !AXIsProcessTrusted() {
+        if !accessibilityStatus(requestIfNeeded: requestAccessibilityIfNeeded) {
             missing.insert(.accessibility)
         }
 
@@ -444,6 +444,16 @@ enum PermissionManager {
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
         }
         return status
+    }
+
+    static func accessibilityStatus(requestIfNeeded: Bool) -> Bool {
+        guard requestIfNeeded else {
+            return AXIsProcessTrusted()
+        }
+        let options = [
+            "AXTrustedCheckOptionPrompt": true
+        ] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
     }
 
     static func openPrivacySettings(for permissions: Set<PermissionKind>) {
@@ -468,6 +478,7 @@ enum PermissionManager {
 final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     private var recorder: AVAudioRecorder?
     private var recordingURL: URL?
+    private var stopContinuation: CheckedContinuation<URL, Error>?
 
     func start() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
@@ -490,20 +501,56 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         return url
     }
 
-    func stop() -> URL? {
-        recorder?.stop()
-        recorder = nil
-        defer { recordingURL = nil }
-        return recordingURL
+    func stop() async throws -> URL {
+        guard let recordingURL else {
+            throw TypeNoError.noRecording
+        }
+        guard let recorder else {
+            return recordingURL
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            stopContinuation = continuation
+            recorder.stop()
+            self.recorder = nil
+        }
     }
 
     func cancel() {
+        finishStop(with: .failure(CancellationError()))
         recorder?.stop()
         recorder = nil
         if let recordingURL {
             try? FileManager.default.removeItem(at: recordingURL)
         }
         recordingURL = nil
+    }
+
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        Task { @MainActor in
+            if flag, let recordingURL {
+                finishStop(with: .success(recordingURL))
+            } else {
+                finishStop(with: .failure(TypeNoError.noRecording))
+            }
+            recordingURL = nil
+        }
+    }
+
+    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: (any Error)?) {
+        Task { @MainActor in
+            finishStop(with: .failure(error ?? TypeNoError.noRecording))
+            recordingURL = nil
+        }
+    }
+
+    private func finishStop(with result: Result<URL, Error>) {
+        guard let stopContinuation else { return }
+        self.stopContinuation = nil
+        switch result {
+        case .success(let url): stopContinuation.resume(returning: url)
+        case .failure(let err): stopContinuation.resume(throwing: err)
+        }
     }
 }
 
@@ -604,7 +651,13 @@ final class ColiASRService: @unchecked Sendable {
         let env = ProcessInfo.processInfo.environment
         let home = env["HOME"] ?? ""
 
+        // Check current environment PATH first
+        if let pathInEnv = executableInPath(named: "coli", path: env["PATH"]) {
+            return pathInEnv
+        }
+
         let candidates = [
+            home + "/.local/bin/coli",
             "/opt/homebrew/bin/coli",
             "/usr/local/bin/coli",
             home + "/.npm-global/bin/coli",
@@ -618,15 +671,59 @@ final class ColiASRService: @unchecked Sendable {
             return found
         }
 
+        // Check fnm/nvm managed Node installs
+        let managedRoots: [(root: String, rel: String)] = [
+            (home + "/.local/share/fnm/node-versions", "installation/bin/coli"),
+            (home + "/.nvm/versions/node", "bin/coli")
+        ]
+        for managed in managedRoots {
+            if let path = newestManagedBinary(under: managed.root, relativePath: managed.rel) {
+                return path
+            }
+        }
+
         // GUI apps don't inherit terminal PATH, so spawn a login shell to resolve coli
         return resolveViaShell("coli")
+    }
+
+    private static func executableInPath(named name: String, path: String?) -> String? {
+        guard let path else { return nil }
+        for dir in path.split(separator: ":") {
+            let full = String(dir) + "/\(name)"
+            if FileManager.default.isExecutableFile(atPath: full) { return full }
+        }
+        return nil
+    }
+
+    private static func newestManagedBinary(under rootPath: String, relativePath: String) -> String? {
+        let fm = FileManager.default
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        guard let entries = try? fm.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        let sorted = entries
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted {
+                let d1 = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let d2 = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return d1 != d2 ? d1 > d2 : $0.lastPathComponent > $1.lastPathComponent
+            }
+
+        for dir in sorted {
+            let path = dir.path + "/" + relativePath
+            if fm.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
     }
 
     private static func resolveViaShell(_ command: String) -> String? {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell)
-        process.arguments = ["-l", "-c", "which \(command)"]
+        process.arguments = ["-l", "-c", "command -v \(command)"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
