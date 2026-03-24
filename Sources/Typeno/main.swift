@@ -127,6 +127,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try await appState.stopRecording()
                 await appState.transcribeAndInsert()
+            } catch is CancellationError {
+                // User canceled intentionally; keep the app in its reset state.
             } catch {
                 appState.showError(error.localizedDescription)
             }
@@ -227,10 +229,7 @@ final class AppState: ObservableObject {
         phase = .transcribing
         onOverlayRequest?(true)
 
-        guard let url = try await recorder.stop() else {
-            throw TypeNoError.noRecording
-        }
-
+        let url = try await recorder.stop()
         currentRecordingURL = url
     }
 
@@ -451,7 +450,7 @@ enum PermissionManager {
 final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     private var recorder: AVAudioRecorder?
     private var recordingURL: URL?
-    private var stopContinuation: CheckedContinuation<URL?, Error>?
+    private var stopContinuation: CheckedContinuation<URL, Error>?
 
     func start() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
@@ -474,8 +473,13 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         return url
     }
 
-    func stop() async throws -> URL? {
-        guard let recorder else { return nil }
+    func stop() async throws -> URL {
+        guard let recordingURL else {
+            throw TypeNoError.noRecording
+        }
+        guard let recorder else {
+            return recordingURL
+        }
 
         return try await withCheckedThrowingContinuation { continuation in
             stopContinuation = continuation
@@ -486,7 +490,7 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     func cancel() {
-        finishStop(with: .success(nil))
+        finishStop(with: .failure(CancellationError()))
         recorder?.stop()
         recorder = nil
         if let recordingURL {
@@ -497,7 +501,7 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
 
     nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
         Task { @MainActor in
-            if flag {
+            if flag, let recordingURL {
                 finishStop(with: .success(recordingURL))
             } else {
                 finishStop(with: .failure(TypeNoError.noRecording))
@@ -513,13 +517,13 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         }
     }
 
-    private func finishStop(with result: Result<URL?, Error>) {
+    private func finishStop(with result: Result<URL, Error>) {
         guard let stopContinuation else { return }
         self.stopContinuation = nil
 
         switch result {
-        case .success(let url):
-            stopContinuation.resume(returning: url)
+        case .success(let recordingURL):
+            stopContinuation.resume(returning: recordingURL)
         case .failure(let error):
             stopContinuation.resume(throwing: error)
         }
