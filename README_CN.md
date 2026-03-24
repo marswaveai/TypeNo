@@ -57,4 +57,4 @@ TypeNo 只做一件事：语音 → 文字 → 粘贴。没有多余的 UI，没
 
 ## 许可证
 
-MIT
+GNU General Public License v3.0

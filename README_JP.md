@@ -57,4 +57,4 @@ TypeNo がやることはひとつだけ：音声 → テキスト → ペース
 
 ## ライセンス
 
-MIT
+GNU General Public License v3.0

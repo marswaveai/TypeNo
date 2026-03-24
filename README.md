@@ -14,16 +14,37 @@ That's it. No windows, no settings, no accounts.
 
 ## Install
 
-### Prerequisites
+### Option 1 — Download the App
 
-- macOS 14+
-- [coli](https://github.com/nicepkg/coli) for local speech recognition:
+For most users, the easiest way is to download the latest release:
+
+- [Download TypeNo for macOS](https://github.com/nicepkg/TypeNo/releases/latest)
+- Download the latest `TypeNo.app.zip`
+- Unzip it
+- Move `TypeNo.app` to `/Applications`
+- Open TypeNo
+
+If macOS blocks the app the first time, go to **System Settings → Privacy & Security** and allow it to open.
+
+### Install the speech engine
+
+TypeNo uses [coli](https://github.com/nicepkg/coli) for local speech recognition:
 
 ```bash
 npm i -g @anthropic-ai/coli
 ```
 
-### Build from Source
+### First Launch
+
+TypeNo needs two one-time permissions:
+- **Microphone** — to capture your voice
+- **Accessibility** — to paste text into apps
+
+The app will guide you through granting these on first launch.
+
+### Option 2 — Build from Source
+
+If you prefer to build it yourself:
 
 ```bash
 git clone https://github.com/nicepkg/TypeNo.git
@@ -33,14 +54,6 @@ scripts/build_app.sh
 ```
 
 The app will be at `dist/TypeNo.app`. Move it to `/Applications/` for persistent permissions.
-
-### First Launch
-
-TypeNo needs two permissions (one-time):
-- **Microphone** — to capture your voice
-- **Accessibility** — to paste text into apps
-
-The app will guide you through granting these on first launch.
 
 ## Usage
 
@@ -62,4 +75,4 @@ TypeNo does one thing: voice → text → paste. No extra UI, no preferences, no
 
 ## License
 
-MIT
+GNU General Public License v3.0
