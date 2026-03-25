@@ -258,30 +258,39 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Route progress messages to the correct UI — download or transcription
+    func handleProgressMessage(_ message: String) {
+        if message.contains("MB") || message.contains("Downloading") || message.contains("Extracting") || message.contains("ready") {
+            // Model download progress → circular progress ring
+            let progress: Double
+            let display: String
+            if let pctRange = message.range(of: #"\([\d.]+%\)"#, options: .regularExpression),
+               let pctVal = Double(message[pctRange].dropFirst().dropLast().replacingOccurrences(of: "%", with: "")) {
+                progress = pctVal / 100.0
+                let parts = message.components(separatedBy: "(")[0]
+                    .trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: " MB / ", with: " / ")
+                display = parts + " MB"
+            } else if message.contains("Extracting") {
+                progress = 1.0
+                display = "Extracting..."
+            } else {
+                progress = 0
+                display = message
+            }
+            phase = .downloadingModel(progress: progress, text: display)
+        } else {
+            // Normal transcription progress
+            phase = .transcribing(message)
+        }
+    }
+
     func downloadModelThenRecord() async {
         phase = .downloadingModel(progress: 0, text: "Checking model...")
 
         do {
             try await asrService.downloadModel { [weak self] message in
-                // Parse "42.5 MB / 155.5 MB (27.3%)" into progress + text
-                let progress: Double
-                let display: String
-                if let pctRange = message.range(of: #"\([\d.]+%\)"#, options: .regularExpression),
-                   let pctVal = Double(message[pctRange].dropFirst().dropLast().replacingOccurrences(of: "%", with: "")) {
-                    progress = pctVal / 100.0
-                    // Extract "42.5 / 155.5 MB"
-                    let parts = message.components(separatedBy: "(")[0]
-                        .trimmingCharacters(in: .whitespaces)
-                        .replacingOccurrences(of: " MB / ", with: " / ")
-                    display = parts + " MB"
-                } else if message.contains("Extracting") {
-                    progress = 1.0
-                    display = "Extracting..."
-                } else {
-                    progress = 0
-                    display = message
-                }
-                self?.phase = .downloadingModel(progress: progress, text: display)
+                self?.handleProgressMessage(message)
             }
             // Model ready, start recording
             phase = .idle
@@ -395,7 +404,7 @@ final class AppState: ObservableObject {
 
         do {
             let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
-                self?.phase = .transcribing(message)
+                self?.handleProgressMessage(message)
             }
             progressTimer.invalidate()
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -479,7 +488,7 @@ final class AppState: ObservableObject {
 
         do {
             let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
-                self?.phase = .transcribing(message)
+                self?.handleProgressMessage(message)
             }
             progressTimer.invalidate()
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
