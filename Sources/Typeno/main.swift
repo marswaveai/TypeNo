@@ -628,9 +628,13 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     }
 
     func stop() -> URL? {
-        engine?.inputNode.removeTap(onBus: 0)
+        // Stop engine first to ensure audio IO thread finishes,
+        // then remove tap so no more callbacks fire
         engine?.stop()
+        engine?.inputNode.removeTap(onBus: 0)
         engine = nil
+        // Small delay to let any in-flight tap callback finish
+        Thread.sleep(forTimeInterval: 0.05)
         outputFile = nil
         if let setup = fftSetup {
             vDSP_destroy_fftsetup(setup)
