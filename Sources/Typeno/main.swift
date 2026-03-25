@@ -349,7 +349,9 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let text = try await asrService.transcribe(fileURL: url)
+            let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
+                self?.phase = .transcribing(message)
+            }
             progressTimer.invalidate()
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -359,7 +361,7 @@ final class AppState: ObservableObject {
 
             // Show result briefly, then auto-insert
             phase = .done(transcript)
-    
+
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
             progressTimer.invalidate()
@@ -433,7 +435,9 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let text = try await asrService.transcribe(fileURL: url)
+            let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
+                self?.phase = .transcribing(message)
+            }
             progressTimer.invalidate()
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -733,6 +737,14 @@ private final class LockedData: @unchecked Sendable {
     func read() -> Data { lock.lock(); defer { lock.unlock() }; return data }
 }
 
+/// Thread-safe timestamp for tracking last activity.
+private final class AtomicTimestamp: @unchecked Sendable {
+    private var value: TimeInterval = Date().timeIntervalSince1970
+    private let lock = NSLock()
+    func update() { lock.lock(); value = Date().timeIntervalSince1970; lock.unlock() }
+    func elapsed() -> TimeInterval { lock.lock(); defer { lock.unlock() }; return Date().timeIntervalSince1970 - value }
+}
+
 final class ColiASRService: @unchecked Sendable {
     static var isInstalled: Bool {
         findColiPath() != nil
@@ -790,11 +802,11 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 600-second timeout for install
+                    // 120-second timeout for install
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning { process.terminate() }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
@@ -828,7 +840,7 @@ final class ColiASRService: @unchecked Sendable {
         }
     }
 
-    func transcribe(fileURL: URL) async throws -> String {
+    func transcribe(fileURL: URL, onProgress: (@MainActor @Sendable (String) -> Void)? = nil) async throws -> String {
         guard let coliPath = Self.findColiPath() else {
             throw TypeNoError.coliNotInstalled
         }
@@ -866,13 +878,45 @@ final class ColiASRService: @unchecked Sendable {
                     let stdoutHandle = stdout.fileHandleForReading
                     let stderrHandle = stderr.fileHandleForReading
 
+                    // Track last activity — reset on any stderr output (download progress)
+                    let lastActivity = AtomicTimestamp()
+
                     stdoutHandle.readabilityHandler = { handle in
                         let data = handle.availableData
                         if !data.isEmpty { stdoutBuf.append(data) }
                     }
                     stderrHandle.readabilityHandler = { handle in
                         let data = handle.availableData
-                        if !data.isEmpty { stderrBuf.append(data) }
+                        if !data.isEmpty {
+                            stderrBuf.append(data)
+                            lastActivity.update()
+
+                            // Parse download progress from stderr and report
+                            if let onProgress, let text = String(data: data, encoding: .utf8) {
+                                // coli outputs lines like: "  42.5 MB / 155.5 MB (27.3%)"
+                                // or "Downloading sherpa-onnx-sense-voice..."
+                                // or "Extracting..."
+                                let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !line.isEmpty {
+                                    let display: String
+                                    if line.contains("MB") && line.contains("%") {
+                                        // Extract progress like "42.5 MB / 155.5 MB (27.3%)"
+                                        display = "Downloading model: \(line)"
+                                    } else if line.contains("Downloading") {
+                                        display = line
+                                    } else if line.contains("Extracting") {
+                                        display = "Extracting model..."
+                                    } else if line.contains("ready") {
+                                        display = "Model ready"
+                                    } else {
+                                        display = line
+                                    }
+                                    Task { @MainActor in
+                                        onProgress(display)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     self?.processLock.lock()
@@ -881,16 +925,19 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 600-second timeout (model download on first run can be slow)
-                    let timeoutItem = DispatchWorkItem {
-                        if process.isRunning {
+                    // Idle timeout: kill if no output for 120s
+                    // If downloading (stderr active), keeps waiting indefinitely
+                    let timeoutCheck = DispatchSource.makeTimerSource(queue: .global())
+                    timeoutCheck.schedule(deadline: .now() + 10, repeating: 10)
+                    timeoutCheck.setEventHandler {
+                        if lastActivity.elapsed() > 120 && process.isRunning {
                             process.terminate()
                         }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
+                    timeoutCheck.resume()
 
                     process.waitUntilExit()
-                    timeoutItem.cancel()
+                    timeoutCheck.cancel()
 
                     // Stop reading handlers
                     stdoutHandle.readabilityHandler = nil
