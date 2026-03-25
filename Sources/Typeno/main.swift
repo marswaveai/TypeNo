@@ -1444,11 +1444,11 @@ struct OverlayView: View {
                     Text(message)
                         .font(.system(size: 13))
                         .foregroundStyle(.primary)
-                    Button("OK") {
-                        appState.onCancel?()
+                    Button(action: { appState.onCancel?() }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
                     }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 12))
+                    .buttonStyle(.plain)
                 }
             } else if case .updating(let message) = appState.phase {
                 HStack(spacing: 10) {
