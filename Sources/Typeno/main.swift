@@ -411,9 +411,29 @@ final class AppState: ObservableObject {
         phase = .transcribing(L("Checking model...", "检测模型中..."))
         onOverlayRequest?(true)
 
-        // Create a tiny silent WAV to trigger coli's model download
-        let silentURL = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
-        if !FileManager.default.fileExists(atPath: silentURL.path) {
+        do {
+            _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
+                self?.phase = .transcribing(message)
+            }
+        } catch {
+            guard !cancelled else { return }
+            showError(L("Model download failed", "模型下载失败"))
+            return
+        }
+
+        // Model ready, start recording
+        guard !cancelled else { return }
+        do {
+            try startRecording()
+        } catch {
+            showError(L("Recording failed", "录音失败"))
+        }
+    }
+
+    /// Create or return path to a tiny silent WAV for triggering model download
+    static func ensureSilentWAV() -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
+        if !FileManager.default.fileExists(atPath: url.path) {
             var header = Data()
             let dataSize: UInt32 = 3200
             let fileSize: UInt32 = 36 + dataSize
@@ -431,26 +451,9 @@ final class AppState: ObservableObject {
             header.append(contentsOf: "data".utf8)
             header.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
             header.append(Data(count: Int(dataSize)))
-            try? header.write(to: silentURL)
+            try? header.write(to: url)
         }
-
-        do {
-            _ = try await asrService.transcribe(fileURL: silentURL) { [weak self] message in
-                self?.phase = .transcribing(message)
-            }
-        } catch {
-            guard !cancelled else { return }
-            showError(L("Model download failed", "模型下载失败"))
-            return
-        }
-
-        // Model ready, start recording
-        guard !cancelled else { return }
-        do {
-            try startRecording()
-        } catch {
-            showError(L("Recording failed", "录音失败"))
-        }
+        return url
     }
 
     func startRecording() throws {
@@ -592,12 +595,28 @@ final class AppState: ObservableObject {
             guard !cancelled else { return }
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
-                if let currentRecordingURL {
-                    try? FileManager.default.removeItem(at: currentRecordingURL)
-                }
-                currentRecordingURL = nil
+                // Preserve user's recording, re-download model, then retry
                 ColiASRService.deleteModelDirectory()
-                await downloadModelThenRecord()
+                phase = .transcribing(L("Checking model...", "检测模型中..."))
+                do {
+                    _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
+                        self?.phase = .transcribing(message)
+                    }
+                    guard !cancelled else { return }
+                    phase = .transcribing()
+                    let retryText = try await asrService.transcribe(fileURL: url)
+                    transcript = retryText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !transcript.isEmpty {
+                        phase = .done(transcript)
+                        onOverlayRequest?(true)
+                        confirmInsert()
+                    } else {
+                        showError(L("No speech detected", "未检测到语音"))
+                    }
+                } catch {
+                    guard !cancelled else { return }
+                    showError(L("Model download failed", "模型下载失败"))
+                }
             } else {
                 showError(msg)
             }
@@ -698,8 +717,7 @@ final class AppState: ObservableObject {
                 ColiASRService.deleteModelDirectory()
                 phase = .transcribing(L("Checking model...", "检测模型中..."))
                 do {
-                    let silentURL = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
-                    _ = try await asrService.transcribe(fileURL: silentURL) { [weak self] message in
+                    _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
                         self?.phase = .transcribing(message)
                     }
                     guard !cancelled else { return }
