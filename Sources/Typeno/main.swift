@@ -396,6 +396,7 @@ final class AppState: ObservableObject {
     private var previousApp: NSRunningApplication?
     private var recordingTimer: Timer?
     private var cancelled = false
+    private var operationID: UInt64 = 0  // incremented on each new operation to invalidate stale callbacks
     private var activeProgressTimer: Timer?
     @Published var recordingElapsedSeconds: Int = 0
 
@@ -410,12 +411,13 @@ final class AppState: ObservableObject {
         ColiASRService.deleteModelDirectory()
         phase = .transcribing(L("Checking model...", "检测模型中..."))
         do {
-            _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
+            _ = try await asrService.transcribe(fileURL: try Self.ensureSilentWAV()) { [weak self] message in
                 self?.phase = .transcribing(message)
             }
             guard !cancelled else { return nil }
             phase = .transcribing()
             let retryText = try await asrService.transcribe(fileURL: fileURL)
+            guard !cancelled else { return nil }
             return retryText.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             guard !cancelled else { return nil }
@@ -431,7 +433,7 @@ final class AppState: ObservableObject {
         onOverlayRequest?(true)
 
         do {
-            _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
+            _ = try await asrService.transcribe(fileURL: try Self.ensureSilentWAV()) { [weak self] message in
                 self?.phase = .transcribing(message)
             }
         } catch {
@@ -450,7 +452,7 @@ final class AppState: ObservableObject {
     }
 
     /// Create or return path to a tiny silent WAV for triggering model download
-    static func ensureSilentWAV() -> URL {
+    static func ensureSilentWAV() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
         if !FileManager.default.fileExists(atPath: url.path) {
             var header = Data()
@@ -470,7 +472,7 @@ final class AppState: ObservableObject {
             header.append(contentsOf: "data".utf8)
             header.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
             header.append(Data(count: Int(dataSize)))
-            try? header.write(to: url)
+            try header.write(to: url)
         }
         return url
     }
@@ -577,12 +579,14 @@ final class AppState: ObservableObject {
             return
         }
 
+        operationID &+= 1
+        let myOp = operationID
         phase = .transcribing()
 
         let startTime = Date()
         let timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, !self.cancelled else { return }
+                guard let self, !self.cancelled, self.operationID == myOp else { return }
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 120 {
                     self.phase = .transcribing(L("Long audio, please wait...", "长音频，请稍候..."))
@@ -677,6 +681,8 @@ final class AppState: ObservableObject {
 
     func transcribeFile(_ url: URL) async {
         cancelled = false
+        operationID &+= 1
+        let myOp = operationID
         previousApp = NSWorkspace.shared.frontmostApplication
         phase = .transcribing()
         onOverlayRequest?(true)
@@ -684,7 +690,7 @@ final class AppState: ObservableObject {
         let startTime = Date()
         let timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, !self.cancelled else { return }
+                guard let self, !self.cancelled, self.operationID == myOp else { return }
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 120 {
                     self.phase = .transcribing(L("Long audio, please wait...", "长音频，请稍候..."))
@@ -1173,11 +1179,20 @@ final class ColiASRService: @unchecked Sendable {
                     }
 
                     // Extract transcription from stdout (skip \r progress overwrites)
-                    // Each \n line may contain \r-separated progress updates; take last \r segment
-                    let result = output.components(separatedBy: "\n")
+                    let hadDownload = output.contains("Downloading")
+                    let lines = output.components(separatedBy: "\n")
                         .map { $0.components(separatedBy: "\r").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
-                        .filter { !$0.isEmpty }
-                        .joined(separator: "\n")
+                        .filter { line in
+                            guard !line.isEmpty else { return false }
+                            // Only filter progress lines if a download actually occurred
+                            if hadDownload {
+                                if line.contains("MB") && line.contains("%") { return false }
+                                if line.contains("Downloading") || line.contains("Extracting") { return false }
+                                if line.hasSuffix("ready.") || line.hasSuffix("ready") { return false }
+                            }
+                            return true
+                        }
+                    let result = lines.joined(separator: "\n")
                     continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
