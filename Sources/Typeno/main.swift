@@ -1514,90 +1514,107 @@ struct OverlayView: View {
         .fixedSize()
     }
 
+    private let barHeight: CGFloat = 32
+
     var compactView: some View {
         Group {
             if case .recording = appState.phase {
                 HStack(spacing: 8) {
+                    // Cancel button — raised circle
                     Button(action: { appState.onCancel?() }) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 22, height: 22)
-                            .contentShape(Circle())
+                        ZStack {
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+                            Circle()
+                                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(width: 24, height: 24)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
 
                     spectrumView
 
+                    // Confirm button — raised circle
                     Button(action: { appState.onToggleRequest?() }) {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 22, height: 22)
-                            .contentShape(Circle())
+                        ZStack {
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+                            Circle()
+                                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.primary)
+                        }
+                        .frame(width: 24, height: 24)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.primary)
                 }
             } else if case .transcribing(let message) = appState.phase {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
                     Text(message)
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                         .foregroundStyle(.primary)
                 }
+                .frame(height: barHeight)
             } else if case .done(let text) = appState.phase {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     Image(systemName: "doc.on.clipboard")
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                     Text(text)
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
                 }
+                .frame(height: barHeight)
             } else if case .error(let message) = appState.phase {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     Text(message)
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                         .foregroundStyle(.primary)
                     Button(action: { appState.onCancel?() }) {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 14))
+                            .font(.system(size: 12))
                     }
                     .buttonStyle(.plain)
                 }
+                .frame(height: barHeight)
             } else if case .updating(let message) = appState.phase {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
                     Text(message)
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                         .foregroundStyle(.primary)
                 }
+                .frame(height: barHeight)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
     }
 
     var spectrumView: some View {
         let raw = appState.recorder.spectrumData
-        // Center-out: low freq (most energy) in center, high freq at edges
-        // Interleave odd bins left, even bins right
-        // Result: [b19, b17, b15, ..., b3, b1, b0, b2, b4, ..., b16, b18]
-        let count = raw.count
-        var bars = [Float](repeating: 0, count: count)
-        let mid = count / 2
-        for i in 0..<count {
+        // Take first 14 bins (voice range), center-out layout
+        let displayCount = 14
+        let source = Array(raw.prefix(displayCount))
+        var bars = [Float](repeating: 0, count: displayCount)
+        let mid = displayCount / 2
+        for i in 0..<source.count {
             if i % 2 == 0 {
-                // Even bins → right side (from center outward)
-                bars[mid + i / 2] = raw[i]
+                bars[mid + i / 2] = source[i]
             } else {
-                // Odd bins → left side (from center outward)
-                bars[mid - 1 - i / 2] = raw[i]
+                bars[mid - 1 - i / 2] = source[i]
             }
         }
 
@@ -1605,10 +1622,10 @@ struct OverlayView: View {
             ForEach(0..<bars.count, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Color.primary.opacity(0.6))
-                    .frame(width: 2.5, height: max(2, CGFloat(bars[index]) * 20))
+                    .frame(width: 2.5, height: max(2, CGFloat(bars[index]) * 18))
             }
         }
-        .frame(height: 22)
+        .frame(height: 20)
         .animation(.easeOut(duration: 0.08), value: raw)
     }
 
