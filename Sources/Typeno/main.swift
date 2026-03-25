@@ -276,7 +276,9 @@ final class AppState: ObservableObject {
                 display = "Extracting"
             } else {
                 progress = 0
-                display = message
+                display = message.replacingOccurrences(of: "...", with: "")
+                    .replacingOccurrences(of: ".", with: "")
+                    .trimmingCharacters(in: .whitespaces)
             }
             phase = .downloadingModel(progress: progress, text: display)
         } else {
