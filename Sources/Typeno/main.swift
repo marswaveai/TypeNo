@@ -32,6 +32,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleToggle()
         }
 
+        appState.onOverlayRequest = { [weak self] visible in
+            if visible {
+                self?.overlayController?.show()
+            } else {
+                self?.overlayController?.hide()
+            }
+        }
+
         appState.onPermissionOpen = { [weak self] kind in
             self?.openPermissionSettings(for: kind)
         }
@@ -147,9 +155,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performUpdate() {
         Task {
             appState.phase = .updating("Checking for updates...")
+            appState.onOverlayRequest?(true)
 
             guard let release = await updateService.checkForUpdate() else {
                 appState.phase = .idle
+                appState.onOverlayRequest?(false)
                 // Show brief "up to date" message
                 appState.showError("Already up to date")
                 return
@@ -225,6 +235,7 @@ final class AppState: ObservableObject {
     @Published var phase: AppPhase = .idle
     @Published var transcript = ""
 
+    var onOverlayRequest: ((Bool) -> Void)?
     var onPermissionOpen: ((PermissionKind) -> Void)?
     var onColiInstallHelpRequest: (() -> Void)?
     var onCancel: (() -> Void)?
@@ -239,7 +250,6 @@ final class AppState: ObservableObject {
     private var spectrumCancellable: AnyCancellable?
 
     init() {
-        // Forward recorder's spectrumData changes to trigger SwiftUI updates
         spectrumCancellable = recorder.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async {
                 self?.objectWillChange.send()
@@ -252,13 +262,13 @@ final class AppState: ObservableObject {
         previousApp = NSWorkspace.shared.frontmostApplication
         currentRecordingURL = try recorder.start()
         phase = .recording
-
+        onOverlayRequest?(true)
     }
 
     func stopRecording() {
         currentRecordingURL = recorder.stop()
         phase = .transcribing()
-
+        onOverlayRequest?(true)
     }
 
     func cancel() {
@@ -270,17 +280,17 @@ final class AppState: ObservableObject {
         currentRecordingURL = nil
         transcript = ""
         phase = .idle
-
+        onOverlayRequest?(false)
     }
 
     func showPermissions(_ missing: Set<PermissionKind>) {
         phase = .permissions(missing)
-
+        onOverlayRequest?(true)
     }
 
     func hidePermissions() {
         phase = .idle
-
+        onOverlayRequest?(false)
     }
 
     func showMissingColi() {
@@ -289,13 +299,13 @@ final class AppState: ObservableObject {
             autoInstallColi()
         } else {
             phase = .missingColi
-    
+            onOverlayRequest?(true)
         }
     }
 
     func autoInstallColi() {
         phase = .installingColi("Installing coli...")
-
+        onOverlayRequest?(true)
 
         Task {
             do {
@@ -305,7 +315,7 @@ final class AppState: ObservableObject {
                 // Verify installation
                 if ColiASRService.isInstalled {
                     phase = .idle
-            
+                    onOverlayRequest?(false)
                 } else {
                     // Fallback to manual guidance
                     phase = .missingColi
@@ -319,13 +329,13 @@ final class AppState: ObservableObject {
     func hideColiGuidance() {
         if case .missingColi = phase {
             phase = .idle
-    
+            onOverlayRequest?(false)
         }
     }
 
     func showError(_ message: String) {
         phase = .error(message)
-
+        onOverlayRequest?(true)
     }
 
     func transcribeAndInsert() async {
@@ -352,8 +362,7 @@ final class AppState: ObservableObject {
         do {
             let text = try await asrService.transcribe(fileURL: url)
             progressTimer.invalidate()
-            let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            transcript = HotwordsManager.shared.correct(raw)
+            transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
@@ -361,7 +370,7 @@ final class AppState: ObservableObject {
 
             // Show result briefly, then auto-insert
             phase = .done(transcript)
-    
+            onOverlayRequest?(true)
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
             progressTimer.invalidate()
@@ -386,7 +395,7 @@ final class AppState: ObservableObject {
         NSPasteboard.general.setString(text, forType: .string)
 
         // Hide overlay
-
+        onOverlayRequest?(false)
 
         // Activate previous app, then Cmd+V
         if let targetApp {
@@ -414,13 +423,13 @@ final class AppState: ObservableObject {
         previousApp = nil
         transcript = ""
         phase = .idle
-
+        onOverlayRequest?(false)
     }
 
     func transcribeFile(_ url: URL) async {
         previousApp = NSWorkspace.shared.frontmostApplication
         phase = .transcribing()
-
+        onOverlayRequest?(true)
 
         let startTime = Date()
         let progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
@@ -437,15 +446,14 @@ final class AppState: ObservableObject {
         do {
             let text = try await asrService.transcribe(fileURL: url)
             progressTimer.invalidate()
-            let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            transcript = HotwordsManager.shared.correct(raw)
+            transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
             }
 
             phase = .done(transcript)
-    
+            onOverlayRequest?(true)
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
             progressTimer.invalidate()
@@ -541,7 +549,6 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     private var engine: AVAudioEngine?
     private var recordingURL: URL?
     private var outputFile: AVAudioFile?
-
     private let fftSize: Int = 1024
     private var fftSetup: FFTSetup?
 
@@ -549,13 +556,13 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
+        let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        // Target format: 16 kHz mono for processing (float32 for AVAudioConverter)
+        // Target format: 16 kHz mono for converter
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16_000,
@@ -565,34 +572,26 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
             throw TypeNoError.noRecording
         }
 
-        // Write WAV as 16-bit signed integer (s16le) — what sherpa-onnx expects
-        // AVAudioFile converts from float32 processing format to int16 on disk
+        // Write as m4a (AAC) — same as original AVAudioRecorder, coli handles it
         let fileSettings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
             AVSampleRateKey: 16_000,
             AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
         ]
         let file = try AVAudioFile(forWriting: url, settings: fileSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
         self.outputFile = file
 
-        // Create converter from input format to 16 kHz mono
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
             throw TypeNoError.noRecording
         }
 
-        let tapBufferSize: AVAudioFrameCount = 4096
-
-        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat) {
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) {
             [weak self] buffer, _ in
             guard let self else { return }
 
-            // Compute spectrum from input buffer (native sample rate)
             let spectrum = self.computeSpectrum(buffer: buffer)
 
-            // Convert to 16 kHz mono and write to file
             let frameCapacity = AVAudioFrameCount(
                 Double(buffer.frameLength) * 16_000 / inputFormat.sampleRate
             )
@@ -614,14 +613,9 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
             }
 
             if error == nil, convertedBuffer.frameLength > 0 {
-                do {
-                    try file.write(from: convertedBuffer)
-                } catch {
-                    // Silently skip write errors during recording
-                }
+                try? file.write(from: convertedBuffer)
             }
 
-            // Publish spectrum on main thread
             DispatchQueue.main.async {
                 self.spectrumData = spectrum
             }
@@ -655,8 +649,6 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         }
     }
 
-    // MARK: - FFT Spectrum
-
     private func computeSpectrum(buffer: AVAudioPCMBuffer) -> [Float] {
         let fftSize = 1024
         guard let channelData = buffer.floatChannelData?[0] else {
@@ -666,13 +658,11 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         let frameLength = Int(buffer.frameLength)
         let count = min(frameLength, fftSize)
 
-        // Window the signal
         var windowed = [Float](repeating: 0, count: fftSize)
         var window = [Float](repeating: 0, count: count)
         vDSP_hann_window(&window, vDSP_Length(count), Int32(vDSP_HANN_NORM))
         vDSP_vmul(channelData, 1, &window, 1, &windowed, 1, vDSP_Length(count))
 
-        // Prepare split complex for FFT
         let halfN = fftSize / 2
         var realp = [Float](repeating: 0, count: halfN)
         var imagp = [Float](repeating: 0, count: halfN)
@@ -686,7 +676,6 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
                     }
                 }
 
-                // Forward FFT
                 let log2n = vDSP_Length(log2(Double(fftSize)))
                 if self.fftSetup == nil {
                     self.fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
@@ -695,23 +684,20 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
                     vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
                 }
 
-                // Compute magnitudes
                 var magnitudes = [Float](repeating: 0, count: halfN)
                 vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfN))
 
-                // Convert to dB
                 var one: Float = 1.0
                 var dbMagnitudes = [Float](repeating: 0, count: halfN)
                 vDSP_vdbcon(&magnitudes, 1, &one, &dbMagnitudes, 1, vDSP_Length(halfN), 1)
                 magnitudes = dbMagnitudes
 
-                // Group into 20 bars — focus on voice frequencies only (~80Hz-4kHz)
                 let barCount = 20
                 var bars = [Float](repeating: 0, count: barCount)
                 let sampleRate = buffer.format.sampleRate
-                let binResolution = sampleRate / Double(fftSize)  // Hz per bin
-                let lowBin = max(1, Int(80.0 / binResolution))    // ~80 Hz
-                let highBin = min(halfN, Int(4000.0 / binResolution))  // ~4 kHz
+                let binResolution = sampleRate / Double(fftSize)
+                let lowBin = max(1, Int(80.0 / binResolution))
+                let highBin = min(halfN, Int(4000.0 / binResolution))
                 let voiceBins = highBin - lowBin
                 guard voiceBins > 0 else { return }
 
@@ -728,22 +714,18 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
                     }
                 }
 
-                // Normalize to 0...1 range
                 let minVal: Float = -80
                 let maxVal: Float = 0
-                // Clamp to -80...0 dB range, then normalize
                 for i in 0..<barCount {
                     bars[i] = (max(minVal, min(maxVal, bars[i])) - minVal) / (maxVal - minVal)
                 }
 
-                // Store result (will be returned)
                 for i in 0..<barCount {
-                    realBuf[i] = bars[i]  // reuse realp buffer temporarily
+                    realBuf[i] = bars[i]
                 }
             }
         }
 
-        // Return the 20-bar result (stored in first 20 elements of realp)
         return Array(realp.prefix(20))
     }
 }
@@ -815,11 +797,11 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 600-second timeout for install
+                    // 120-second timeout for install
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning { process.terminate() }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
@@ -906,13 +888,13 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 600-second timeout (model download on first run can be slow)
+                    // 120-second timeout (model download on first run can be slow)
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning {
                             process.terminate()
                         }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
@@ -1113,80 +1095,6 @@ final class ColiASRService: @unchecked Sendable {
     }
 }
 
-// MARK: - Hotwords Manager
-
-@MainActor
-final class HotwordsManager: ObservableObject {
-    static let shared = HotwordsManager()
-
-    @Published var hotwords: [String] = []
-
-    private let fileURL: URL
-
-    private init() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".typeno", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        fileURL = dir.appendingPathComponent("hotwords.txt")
-        load()
-    }
-
-    func load() {
-        guard let data = try? String(contentsOf: fileURL, encoding: .utf8) else { return }
-        hotwords = data.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-    }
-
-    func save() {
-        let content = hotwords.joined(separator: "\n")
-        try? content.write(to: fileURL, atomically: true, encoding: .utf8)
-    }
-
-    func add(_ word: String) {
-        let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !hotwords.contains(trimmed) else { return }
-        hotwords.append(trimmed)
-        save()
-    }
-
-    func remove(at offsets: IndexSet) {
-        hotwords.remove(atOffsets: offsets)
-        save()
-    }
-
-    func remove(_ word: String) {
-        hotwords.removeAll { $0 == word }
-        save()
-    }
-
-    /// Post-processing correction using replacement pairs.
-    /// Each entry can be either:
-    ///   - A single word (hotword): no correction applied, just for future use
-    ///   - A pair "wrong→right" or "wrong->right": replaces wrong with right
-    /// Example: "你号→你好" will replace "你号" with "你好" in ASR output.
-    func correct(_ text: String) -> String {
-        var result = text
-        for entry in hotwords {
-            // Support "wrong→right" or "wrong->right" format
-            let parts: [String]
-            if entry.contains("→") {
-                parts = entry.components(separatedBy: "→")
-            } else if entry.contains("->") {
-                parts = entry.components(separatedBy: "->")
-            } else {
-                continue  // Single word, no replacement rule
-            }
-            guard parts.count == 2 else { continue }
-            let wrong = parts[0].trimmingCharacters(in: .whitespaces)
-            let right = parts[1].trimmingCharacters(in: .whitespaces)
-            guard !wrong.isEmpty, !right.isEmpty else { continue }
-            result = result.replacingOccurrences(of: wrong, with: right)
-        }
-        return result
-    }
-}
-
 // MARK: - Hotkey Monitor (short-press Control only)
 
 @MainActor
@@ -1290,10 +1198,6 @@ final class StatusItemController: NSObject {
         transcribeItem.target = self
         menu.addItem(transcribeItem)
 
-        let hotwordsItem = NSMenuItem(title: "Manage Hotwords...", action: #selector(openHotwords), keyEquivalent: "")
-        hotwordsItem.target = self
-        menu.addItem(hotwordsItem)
-
         menu.addItem(NSMenuItem.separator())
 
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
@@ -1346,10 +1250,6 @@ final class StatusItemController: NSObject {
     func setUpdateAvailable(_ version: String) {
         guard let item = statusItem.menu?.item(withTag: 200) else { return }
         item.title = "Update Available (v\(version))"
-    }
-
-    @objc private func openHotwords() {
-        HotwordsWindowController.shared.show()
     }
 
     @objc private func transcribeFile() {
@@ -1407,7 +1307,6 @@ final class OverlayPanelController {
     private let panel: NSPanel
     private let hostingView: NSHostingView<OverlayView>
     private let appState: AppState
-
     private var phaseCancellable: AnyCancellable?
 
     init(appState: AppState) {
@@ -1431,23 +1330,20 @@ final class OverlayPanelController {
         panel.hidesOnDeactivate = false
         panel.contentView = hostingView
 
-        // Single source of truth: phase drives show/hide/layout
-        phaseCancellable = appState.$phase.sink { [weak self] phase in
-            guard let self else { return }
+        // Re-layout on phase change so panel stays centered
+        phaseCancellable = appState.$phase.sink { [weak self] _ in
+            guard let self, self.panel.isVisible else { return }
             DispatchQueue.main.async {
-                switch phase {
-                case .idle:
-                    self.hide()
-                case .permissions, .missingColi, .installingColi,
-                     .recording, .transcribing, .done, .error, .updating:
-                    // Let SwiftUI render first, then measure and position
-                    DispatchQueue.main.async {
-                        self.updateLayout()
-                        self.panel.orderFrontRegardless()
-                    }
+                DispatchQueue.main.async {
+                    self.updateLayout()
                 }
             }
         }
+    }
+
+    func show() {
+        updateLayout()
+        panel.orderFrontRegardless()
     }
 
     private func updateLayout() {
@@ -1472,7 +1368,6 @@ final class OverlayPanelController {
                 x = frame.maxX - width - 16
                 y = frame.maxY - height - 16
             } else {
-                // All other states: center bottom
                 x = frame.midX - width / 2
                 y = frame.minY + 48
             }
@@ -1569,7 +1464,6 @@ struct OverlayView: View {
 
     var spectrumView: some View {
         let raw = appState.recorder.spectrumData
-        // Take first 14 bins (voice range), center-out layout
         let displayCount = 14
         let source = Array(raw.prefix(displayCount))
         var bars = [Float](repeating: 0, count: displayCount)
@@ -1882,96 +1776,6 @@ enum UpdateError: LocalizedError {
         case .appNotFound: "Update package is invalid"
         case .replaceFailed: "Failed to replace app"
         }
-    }
-}
-
-// MARK: - Hotwords Settings Window
-
-@MainActor
-final class HotwordsWindowController {
-    static let shared = HotwordsWindowController()
-    private var window: NSWindow?
-
-    func show() {
-        if let existing = window, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 420),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Hotwords Dictionary"
-        window.contentView = NSHostingView(rootView: HotwordsSettingsView())
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        self.window = window
-    }
-}
-
-struct HotwordsSettingsView: View {
-    @ObservedObject var manager = HotwordsManager.shared
-    @State private var newWord = ""
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                TextField("错误词→正确词", text: $newWord)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { addWord() }
-                Button(action: addWord) {
-                    Image(systemName: "plus")
-                }
-                .disabled(newWord.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            .padding()
-
-            Divider()
-
-            if manager.hotwords.isEmpty {
-                Spacer()
-                VStack(spacing: 8) {
-                    Image(systemName: "text.book.closed")
-                        .font(.system(size: 36))
-                        .foregroundColor(.secondary)
-                    Text("No correction rules yet")
-                        .font(.headline)
-                    Text("Add replacement rules like:\n你号→你好\nASR will auto-correct matching text.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 240)
-                }
-                Spacer()
-            } else {
-                List {
-                    ForEach(Array(manager.hotwords.enumerated()), id: \.offset) { index, word in
-                        HStack {
-                            Text(word)
-                            Spacer()
-                            Button(action: { manager.remove(at: IndexSet(integer: index)) }) {
-                                Image(systemName: "trash")
-                                    .foregroundColor(.red)
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func addWord() {
-        let trimmed = newWord.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        manager.add(trimmed)
-        newWord = ""
     }
 }
 
