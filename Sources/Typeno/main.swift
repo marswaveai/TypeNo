@@ -536,8 +536,7 @@ enum PermissionManager {
 
 // MARK: - Audio Engine
 
-@MainActor
-final class AudioEngine: ObservableObject {
+final class AudioEngine: ObservableObject, @unchecked Sendable {
     @Published var spectrumData: [Float] = Array(repeating: 0, count: 20)
 
     private var engine: AVAudioEngine?
@@ -545,7 +544,7 @@ final class AudioEngine: ObservableObject {
     private var outputFile: AVAudioFile?
 
     private let fftSize: Int = 1024
-    private nonisolated(unsafe) var fftSetup: FFTSetup?
+    private var fftSetup: FFTSetup?
 
     func start() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
@@ -578,29 +577,25 @@ final class AudioEngine: ObservableObject {
 
         let tapBufferSize: AVAudioFrameCount = 4096
 
-        // Capture non-isolated references for the audio thread callback
-        nonisolated(unsafe) let weakSelf = self
-        nonisolated(unsafe) let capturedFile = file
-        nonisolated(unsafe) let capturedConverter = converter
-        let capturedTargetFormat = targetFormat
-        let capturedInputSampleRate = inputFormat.sampleRate
+        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat) {
+            [weak self] buffer, _ in
+            guard let self else { return }
 
-        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat) { buffer, _ in
             // Compute spectrum from input buffer (native sample rate)
-            let spectrum = weakSelf.computeSpectrum(buffer: buffer)
+            let spectrum = self.computeSpectrum(buffer: buffer)
 
             // Convert to 16 kHz mono and write to file
             let frameCapacity = AVAudioFrameCount(
-                Double(buffer.frameLength) * 16_000 / capturedInputSampleRate
+                Double(buffer.frameLength) * 16_000 / inputFormat.sampleRate
             )
             guard frameCapacity > 0,
-                  let convertedBuffer = AVAudioPCMBuffer(pcmFormat: capturedTargetFormat, frameCapacity: frameCapacity + 16) else {
+                  let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCapacity + 16) else {
                 return
             }
 
             var error: NSError?
             var allConsumed = false
-            capturedConverter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
                 if allConsumed {
                     outStatus.pointee = .noDataNow
                     return nil
@@ -612,15 +607,15 @@ final class AudioEngine: ObservableObject {
 
             if error == nil, convertedBuffer.frameLength > 0 {
                 do {
-                    try capturedFile.write(from: convertedBuffer)
+                    try file.write(from: convertedBuffer)
                 } catch {
                     // Silently skip write errors during recording
                 }
             }
 
             // Publish spectrum on main thread
-            Task { @MainActor in
-                weakSelf.spectrumData = spectrum
+            DispatchQueue.main.async {
+                self.spectrumData = spectrum
             }
         }
 
@@ -654,7 +649,7 @@ final class AudioEngine: ObservableObject {
 
     // MARK: - FFT Spectrum
 
-    private nonisolated func computeSpectrum(buffer: AVAudioPCMBuffer) -> [Float] {
+    private func computeSpectrum(buffer: AVAudioPCMBuffer) -> [Float] {
         let fftSize = 1024
         guard let channelData = buffer.floatChannelData?[0] else {
             return Array(repeating: 0, count: 20)
