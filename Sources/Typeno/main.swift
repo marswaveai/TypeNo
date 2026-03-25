@@ -707,16 +707,20 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
                 vDSP_vdbcon(&magnitudes, 1, &one, &dbMagnitudes, 1, vDSP_Length(halfN), 1)
                 magnitudes = dbMagnitudes
 
-                // Group into 20 bars (logarithmic-ish distribution)
+                // Group into 20 bars — focus on voice frequencies only (~80Hz-4kHz)
                 let barCount = 20
                 var bars = [Float](repeating: 0, count: barCount)
-                let usableBins = halfN
+                let sampleRate = buffer.format.sampleRate
+                let binResolution = sampleRate / Double(fftSize)  // Hz per bin
+                let lowBin = max(1, Int(80.0 / binResolution))    // ~80 Hz
+                let highBin = min(halfN, Int(4000.0 / binResolution))  // ~4 kHz
+                let voiceBins = highBin - lowBin
+                guard voiceBins > 0 else { return }
+
                 for i in 0..<barCount {
-                    let startFrac = Double(i) / Double(barCount)
-                    let endFrac = Double(i + 1) / Double(barCount)
-                    let startBin = Int(pow(startFrac, 1.5) * Double(usableBins))
-                    let endBin = max(startBin + 1, Int(pow(endFrac, 1.5) * Double(usableBins)))
-                    let clampedEnd = min(endBin, usableBins)
+                    let startBin = lowBin + (i * voiceBins) / barCount
+                    let endBin = lowBin + ((i + 1) * voiceBins) / barCount
+                    let clampedEnd = min(endBin, highBin)
                     if startBin < clampedEnd {
                         var sum: Float = 0
                         magnitudes.withUnsafeBufferPointer { buf in
@@ -1566,18 +1570,12 @@ struct OverlayView: View {
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
     }
 
-    /// Mirror the spectrum: take meaningful bins, arrange as symmetric waveform
-    /// Center bars are tallest, mirrored outward — like Typeless style
-    private var mirroredSpectrum: [Float] {
-        let raw = appState.recorder.spectrumData
-        // Use first 10 bins (where voice energy lives), ignore empty high-freq bins
-        let half = Array(raw.prefix(10))
-        // Build symmetric: reversed + original → center is loudest
-        return half.reversed() + half
-    }
-
     var spectrumView: some View {
-        let bars = mirroredSpectrum
+        let raw = appState.recorder.spectrumData
+        // Mirror: reversed + original → symmetric, center tallest
+        let half = Array(raw.prefix(10))
+        let bars = half.reversed() + half
+
         return HStack(spacing: 2) {
             ForEach(0..<bars.count, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1.5)
@@ -1586,7 +1584,7 @@ struct OverlayView: View {
             }
         }
         .frame(height: 30)
-        .animation(.easeOut(duration: 0.08), value: appState.recorder.spectrumData)
+        .animation(.easeOut(duration: 0.08), value: raw)
     }
 
     func permissionView(missing: Set<PermissionKind>) -> some View {
