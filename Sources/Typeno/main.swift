@@ -120,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Check if model is ready before recording
-        if !ColiASRService.isModelReady {
+        if !ColiASRService.modelDirectoryExists {
             Task { @MainActor in
                 await appState.downloadModelThenRecord()
             }
@@ -425,7 +425,14 @@ final class AppState: ObservableObject {
             showMissingColi()
         } catch {
             progressTimer.invalidate()
-            showError(error.localizedDescription)
+            let msg = error.localizedDescription
+            if msg.contains("protobuf") || msg.contains("Failed to load model") {
+                // Model is corrupt — delete and trigger re-download
+                ColiASRService.deleteModelDirectory()
+                await downloadModelThenRecord()
+            } else {
+                showError(msg)
+            }
         }
     }
 
@@ -508,7 +515,13 @@ final class AppState: ObservableObject {
             showMissingColi()
         } catch {
             progressTimer.invalidate()
-            showError(error.localizedDescription)
+            let msg = error.localizedDescription
+            if msg.contains("protobuf") || msg.contains("Failed to load model") {
+                ColiASRService.deleteModelDirectory()
+                await downloadModelThenRecord()
+            } else {
+                showError(msg)
+            }
         }
     }
 }
@@ -805,28 +818,21 @@ final class ColiASRService: @unchecked Sendable {
         findColiPath() != nil
     }
 
-    /// Check if the ASR model is downloaded, extracted, and intact
-    static var isModelReady: Bool {
+    /// Check if the ASR model directory exists (basic check)
+    static var modelDirectoryExists: Bool {
         let modelDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
         let modelFile = modelDir.appendingPathComponent("model.int8.onnx")
         let tokensFile = modelDir.appendingPathComponent("tokens.txt")
+        return FileManager.default.fileExists(atPath: modelFile.path)
+            && FileManager.default.fileExists(atPath: tokensFile.path)
+    }
 
-        guard FileManager.default.fileExists(atPath: modelFile.path),
-              FileManager.default.fileExists(atPath: tokensFile.path) else {
-            return false
-        }
-
-        // Verify model file is complete (full size ~88MB, reject if < 80MB)
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: modelFile.path),
-              let size = attrs[.size] as? UInt64,
-              size > 80_000_000 else {
-            // Incomplete file — delete corrupt model directory so it re-downloads
-            try? FileManager.default.removeItem(atPath: modelDir.path)
-            return false
-        }
-
-        return true
+    /// Delete model directory (used when model is corrupt)
+    static func deleteModelDirectory() {
+        let modelDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
+        try? FileManager.default.removeItem(atPath: modelDir.path)
     }
 
     /// Download model by running a tiny transcription (coli auto-downloads on first use)
