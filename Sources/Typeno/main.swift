@@ -280,6 +280,7 @@ final class AppState: ObservableObject {
     }
 
     func downloadModelThenRecord() async {
+        cancelled = false
         phase = .downloadingModel(progress: 0, text: "Checking model")
 
         do {
@@ -385,8 +386,7 @@ final class AppState: ObservableObject {
     }
 
     func transcribeAndInsert() async {
-        guard let url = currentRecordingURL else {
-            showError("No recording")
+        guard !cancelled, let url = currentRecordingURL else {
             return
         }
 
