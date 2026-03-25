@@ -388,7 +388,7 @@ final class AppState: ObservableObject {
     /// Download model with progress shown in existing transcribing overlay
     func downloadModelThenRecord() async {
         cancelled = false
-        phase = .transcribing("Checking model...")
+        phase = .transcribing(L("Checking model...", "检测模型中..."))
         onOverlayRequest?(true)
 
         // Create a tiny silent WAV to trigger coli's model download
@@ -420,7 +420,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             guard !cancelled else { return }
-            showError("Model download failed: \(error.localizedDescription)")
+            showError(L("Model download failed", "模型下载失败"))
             return
         }
 
@@ -429,7 +429,7 @@ final class AppState: ObservableObject {
         do {
             try startRecording()
         } catch {
-            showError("Recording failed: \(error.localizedDescription)")
+            showError(L("Recording failed", "录音失败"))
         }
     }
 
@@ -678,7 +678,7 @@ final class AppState: ObservableObject {
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
                 ColiASRService.deleteModelDirectory()
                 // Retry once after re-download
-                phase = .transcribing("Checking model...")
+                phase = .transcribing(L("Checking model...", "检测模型中..."))
                 do {
                     let silentURL = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
                     _ = try await asrService.transcribe(fileURL: silentURL) { [weak self] message in
@@ -696,11 +696,11 @@ final class AppState: ObservableObject {
                         try? await Task.sleep(for: .seconds(2))
                         cancel()
                     } else {
-                        showError("No speech detected")
+                        showError(L("No speech detected", "未检测到语音"))
                     }
                 } catch {
                     guard !cancelled else { return }
-                    showError("Model download failed")
+                    showError(L("Model download failed", "模型下载失败"))
                 }
             } else {
                 showError(msg)
@@ -1056,26 +1056,28 @@ final class ColiASRService: @unchecked Sendable {
                         guard !line.isEmpty else { return }
                         guard line.contains("MB") || line.contains("Downloading") || line.contains("Extracting") || line.contains("ready") else { return }
 
-                        // Throttle to max once per second
                         guard lastProgressUpdate.elapsed() > 1.0 else { return }
                         lastProgressUpdate.update()
 
-                        // Format: "42.5 MB / 155.5 MB (27.3%)" → "42.5 / 155.5 MB 27%"
+                        // "42.5 MB / 155.5 MB (27.3%)" → "42.5MB / 27%"
                         let display: String
                         if line.contains("MB") && line.contains("%") {
-                            let beforePct = line.components(separatedBy: "(")[0].trimmingCharacters(in: .whitespaces)
-                            let formatted = beforePct
-                                .replacingOccurrences(of: " MB / ", with: " / ")
-                                .replacingOccurrences(of: " MB", with: "") + " MB"
+                            // Extract downloaded MB (first number before "MB")
+                            let downloaded = line.trimmingCharacters(in: .whitespaces)
+                                .components(separatedBy: " MB")[0]
+                                .trimmingCharacters(in: .whitespaces)
                             // Extract percentage
                             if let pctRange = line.range(of: #"\d+\.?\d*%"#, options: .regularExpression) {
-                                display = "\(formatted) \(line[pctRange])"
+                                display = "\(downloaded)MB / \(line[pctRange])"
                             } else {
-                                display = formatted
+                                display = "\(downloaded)MB"
                             }
+                        } else if line.contains("Extracting") {
+                            display = L("Extracting...", "解压中...")
+                        } else if line.contains("ready") {
+                            display = L("Model ready", "模型就绪")
                         } else {
-                            display = line.replacingOccurrences(of: "...", with: "")
-                                .trimmingCharacters(in: .whitespaces)
+                            display = L("Downloading model...", "下载模型中...")
                         }
                         Task { @MainActor in onProgress(display) }
                     }
