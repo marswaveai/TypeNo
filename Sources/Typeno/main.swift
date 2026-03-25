@@ -1441,10 +1441,13 @@ final class OverlayPanelController {
         panel.contentView = hostingView
 
         // Re-layout and re-center when phase changes
+        // Use two async hops: first lets SwiftUI update, second reads new size
         phaseCancellable = appState.$phase.sink { [weak self] _ in
             guard let self, self.panel.isVisible else { return }
             DispatchQueue.main.async {
-                self.updateLayout()
+                DispatchQueue.main.async {
+                    self.updateLayout()
+                }
             }
         }
     }
