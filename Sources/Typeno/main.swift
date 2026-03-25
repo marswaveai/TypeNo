@@ -230,6 +230,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             permissionsGranted = true
         }
 
+        // Check model before recording
+        if !ColiASRService.modelDirectoryExists {
+            Task { @MainActor in
+                await appState.downloadModelThenRecord()
+            }
+            return
+        }
+
         do {
             try appState.startRecording()
         } catch {
@@ -367,6 +375,8 @@ final class AppState: ObservableObject {
     private var currentRecordingURL: URL?
     private var previousApp: NSRunningApplication?
     private var recordingTimer: Timer?
+    private var cancelled = false
+    private var activeProgressTimer: Timer?
     @Published var recordingElapsedSeconds: Int = 0
 
     var recordingElapsedStr: String {
@@ -375,7 +385,56 @@ final class AppState: ObservableObject {
         return String(format: "%d:%02d", m, s)
     }
 
+    /// Download model with progress shown in existing transcribing overlay
+    func downloadModelThenRecord() async {
+        cancelled = false
+        phase = .transcribing("Checking model...")
+        onOverlayRequest?(true)
+
+        // Create a tiny silent WAV to trigger coli's model download
+        let silentURL = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
+        if !FileManager.default.fileExists(atPath: silentURL.path) {
+            var header = Data()
+            let dataSize: UInt32 = 3200
+            let fileSize: UInt32 = 36 + dataSize
+            header.append(contentsOf: "RIFF".utf8)
+            header.append(contentsOf: withUnsafeBytes(of: fileSize.littleEndian) { Array($0) })
+            header.append(contentsOf: "WAVE".utf8)
+            header.append(contentsOf: "fmt ".utf8)
+            header.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })
+            header.append(contentsOf: withUnsafeBytes(of: UInt32(16000).littleEndian) { Array($0) })
+            header.append(contentsOf: withUnsafeBytes(of: UInt32(32000).littleEndian) { Array($0) })
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(2).littleEndian) { Array($0) })
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Array($0) })
+            header.append(contentsOf: "data".utf8)
+            header.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
+            header.append(Data(count: Int(dataSize)))
+            try? header.write(to: silentURL)
+        }
+
+        do {
+            _ = try await asrService.transcribe(fileURL: silentURL) { [weak self] message in
+                self?.phase = .transcribing(message)
+            }
+        } catch {
+            guard !cancelled else { return }
+            showError("Model download failed: \(error.localizedDescription)")
+            return
+        }
+
+        // Model ready, start recording
+        guard !cancelled else { return }
+        do {
+            try startRecording()
+        } catch {
+            showError("Recording failed: \(error.localizedDescription)")
+        }
+    }
+
     func startRecording() throws {
+        cancelled = false
         transcript = ""
         previousApp = NSWorkspace.shared.frontmostApplication
         currentRecordingURL = try recorder.start()
@@ -398,8 +457,11 @@ final class AppState: ObservableObject {
     }
 
     func cancel() {
+        cancelled = true
         recordingTimer?.invalidate()
         recordingTimer = nil
+        activeProgressTimer?.invalidate()
+        activeProgressTimer = nil
         recorder.cancel()
         asrService.cancelCurrentProcess()
         if let currentRecordingURL {
@@ -467,43 +529,59 @@ final class AppState: ObservableObject {
     }
 
     func transcribeAndInsert() async {
-        guard let url = currentRecordingURL else {
-            showError("No recording")
+        guard !cancelled, let url = currentRecordingURL else {
             return
         }
 
         phase = .transcribing()
 
-        // Progress timer: only kick in for very long transcriptions (> 2 min)
         let startTime = Date()
-        let progressTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                guard let self, !self.cancelled else { return }
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 120 {
-                    self?.phase = .transcribing(L("Long audio, please wait...", "长音频，请稍候..."))
+                    self.phase = .transcribing(L("Long audio, please wait...", "长音频，请稍候..."))
                 }
             }
         }
+        activeProgressTimer = timer
 
         do {
-            let text = try await asrService.transcribe(fileURL: url)
-            progressTimer.invalidate()
+            let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
+                self?.phase = .transcribing(message)
+            }
+            timer.invalidate()
+            activeProgressTimer = nil
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
             }
 
-            // Show result briefly, then auto-insert
             phase = .done(transcript)
             onOverlayRequest?(true)
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeProgressTimer = nil
             showMissingColi()
         } catch {
-            progressTimer.invalidate()
-            showError(error.localizedDescription)
+            timer.invalidate()
+            activeProgressTimer = nil
+            guard !cancelled else { return }
+            let msg = error.localizedDescription
+            if msg.contains("protobuf") || msg.contains("Failed to load model") {
+                // Model corrupt — clean up recording, delete model, re-download
+                if let currentRecordingURL {
+                    try? FileManager.default.removeItem(at: currentRecordingURL)
+                }
+                currentRecordingURL = nil
+                ColiASRService.deleteModelDirectory()
+                await downloadModelThenRecord()
+            } else {
+                showError(msg)
+            }
         }
     }
 
@@ -553,23 +631,29 @@ final class AppState: ObservableObject {
     }
 
     func transcribeFile(_ url: URL) async {
+        cancelled = false
         previousApp = NSWorkspace.shared.frontmostApplication
         phase = .transcribing()
         onOverlayRequest?(true)
 
         let startTime = Date()
-        let progressTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                guard let self, !self.cancelled else { return }
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 120 {
-                    self?.phase = .transcribing(L("Long audio, please wait...", "长音频，请稍候..."))
+                    self.phase = .transcribing(L("Long audio, please wait...", "长音频，请稍候..."))
                 }
             }
         }
+        activeProgressTimer = timer
 
         do {
-            let text = try await asrService.transcribe(fileURL: url)
-            progressTimer.invalidate()
+            let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
+                self?.phase = .transcribing(message)
+            }
+            timer.invalidate()
+            activeProgressTimer = nil
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
@@ -578,17 +662,49 @@ final class AppState: ObservableObject {
 
             phase = .done(transcript)
             onOverlayRequest?(true)
-            // Copy to clipboard (don't paste into another app)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(transcript, forType: .string)
             try? await Task.sleep(for: .seconds(2))
             cancel()
         } catch TypeNoError.coliNotInstalled {
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeProgressTimer = nil
             showMissingColi()
         } catch {
-            progressTimer.invalidate()
-            showError(error.localizedDescription)
+            timer.invalidate()
+            activeProgressTimer = nil
+            guard !cancelled else { return }
+            let msg = error.localizedDescription
+            if msg.contains("protobuf") || msg.contains("Failed to load model") {
+                ColiASRService.deleteModelDirectory()
+                // Retry once after re-download
+                phase = .transcribing("Checking model...")
+                do {
+                    let silentURL = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
+                    _ = try await asrService.transcribe(fileURL: silentURL) { [weak self] message in
+                        self?.phase = .transcribing(message)
+                    }
+                    guard !cancelled else { return }
+                    phase = .transcribing()
+                    let retryText = try await asrService.transcribe(fileURL: url)
+                    transcript = retryText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !transcript.isEmpty {
+                        phase = .done(transcript)
+                        onOverlayRequest?(true)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(transcript, forType: .string)
+                        try? await Task.sleep(for: .seconds(2))
+                        cancel()
+                    } else {
+                        showError("No speech detected")
+                    }
+                } catch {
+                    guard !cancelled else { return }
+                    showError("Model download failed")
+                }
+            } else {
+                showError(msg)
+            }
         }
     }
 }
@@ -761,9 +877,34 @@ private final class LockedData: @unchecked Sendable {
     func read() -> Data { lock.lock(); defer { lock.unlock() }; return data }
 }
 
+/// Thread-safe timestamp for tracking last activity.
+private final class AtomicTimestamp: @unchecked Sendable {
+    private var value: TimeInterval = Date().timeIntervalSince1970
+    private let lock = NSLock()
+    func update() { lock.lock(); value = Date().timeIntervalSince1970; lock.unlock() }
+    func elapsed() -> TimeInterval { lock.lock(); defer { lock.unlock() }; return Date().timeIntervalSince1970 - value }
+}
+
 final class ColiASRService: @unchecked Sendable {
     static var isInstalled: Bool {
         findColiPath() != nil
+    }
+
+    /// Check if the ASR model directory has required files
+    static var modelDirectoryExists: Bool {
+        let modelDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
+        let modelFile = modelDir.appendingPathComponent("model.int8.onnx")
+        let tokensFile = modelDir.appendingPathComponent("tokens.txt")
+        return FileManager.default.fileExists(atPath: modelFile.path)
+            && FileManager.default.fileExists(atPath: tokensFile.path)
+    }
+
+    /// Delete model directory (used when model is corrupt)
+    static func deleteModelDirectory() {
+        let modelDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
+        try? FileManager.default.removeItem(atPath: modelDir.path)
     }
 
     static var isNpmAvailable: Bool {
@@ -856,7 +997,7 @@ final class ColiASRService: @unchecked Sendable {
         }
     }
 
-    func transcribe(fileURL: URL) async throws -> String {
+    func transcribe(fileURL: URL, onProgress: (@MainActor @Sendable (String) -> Void)? = nil) async throws -> String {
         guard let coliPath = Self.findColiPath() else {
             throw TypeNoError.coliNotInstalled
         }
@@ -868,13 +1009,12 @@ final class ColiASRService: @unchecked Sendable {
                     process.executableURL = URL(fileURLWithPath: coliPath)
                     process.arguments = ["asr", fileURL.path]
 
-                    // Inherit a proper PATH so node/bun can be found
                     var env = ProcessInfo.processInfo.environment
                     let home = env["HOME"] ?? ""
                     let extraPaths = [
                         "/opt/homebrew/bin",
                         "/usr/local/bin",
-                        home + "/.nvm/versions/node/",  // nvm
+                        home + "/.nvm/versions/node/",
                         home + "/.bun/bin",
                         home + "/.npm-global/bin",
                         "/opt/homebrew/opt/node/bin"
@@ -882,10 +1022,6 @@ final class ColiASRService: @unchecked Sendable {
                     let existingPath = env["PATH"] ?? "/usr/bin:/bin"
                     env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
 
-                    // Inject macOS system proxy settings so Node.js fetch (undici) can reach
-                    // the internet when a system proxy is configured (e.g. via System Settings).
-                    // GUI apps don't source shell profiles, so HTTP_PROXY / HTTPS_PROXY are
-                    // typically unset even when the system proxy is active.
                     if env["HTTP_PROXY"] == nil && env["HTTPS_PROXY"] == nil && env["http_proxy"] == nil {
                         if let proxyURL = Self.systemHTTPSProxyURL() {
                             env["HTTPS_PROXY"] = proxyURL
@@ -902,19 +1038,63 @@ final class ColiASRService: @unchecked Sendable {
                     process.standardOutput = stdout
                     process.standardError = stderr
 
-                    // Read pipe data asynchronously to avoid deadlock when buffer fills up
                     let stdoutBuf = LockedData()
                     let stderrBuf = LockedData()
                     let stdoutHandle = stdout.fileHandleForReading
                     let stderrHandle = stderr.fileHandleForReading
 
+                    // Track last output activity for smart idle timeout
+                    let lastActivity = AtomicTimestamp()
+                    // Throttle progress updates to once per second
+                    let lastProgressUpdate = AtomicTimestamp()
+
+                    // Parse download progress from stdout (\r-separated lines)
+                    @Sendable func forwardProgress(_ data: Data) {
+                        guard let onProgress, let text = String(data: data, encoding: .utf8) else { return }
+                        let line = text.components(separatedBy: "\r").last?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        guard !line.isEmpty else { return }
+                        guard line.contains("MB") || line.contains("Downloading") || line.contains("Extracting") || line.contains("ready") else { return }
+
+                        // Throttle to max once per second
+                        guard lastProgressUpdate.elapsed() > 1.0 else { return }
+                        lastProgressUpdate.update()
+
+                        // Format: "42.5 MB / 155.5 MB (27.3%)" → "42.5 / 155.5 MB 27%"
+                        let display: String
+                        if line.contains("MB") && line.contains("%") {
+                            let beforePct = line.components(separatedBy: "(")[0].trimmingCharacters(in: .whitespaces)
+                            let formatted = beforePct
+                                .replacingOccurrences(of: " MB / ", with: " / ")
+                                .replacingOccurrences(of: " MB", with: "") + " MB"
+                            // Extract percentage
+                            if let pctRange = line.range(of: #"\d+\.?\d*%"#, options: .regularExpression) {
+                                display = "\(formatted) \(line[pctRange])"
+                            } else {
+                                display = formatted
+                            }
+                        } else {
+                            display = line.replacingOccurrences(of: "...", with: "")
+                                .trimmingCharacters(in: .whitespaces)
+                        }
+                        Task { @MainActor in onProgress(display) }
+                    }
+
                     stdoutHandle.readabilityHandler = { handle in
                         let data = handle.availableData
-                        if !data.isEmpty { stdoutBuf.append(data) }
+                        if !data.isEmpty {
+                            stdoutBuf.append(data)
+                            lastActivity.update()
+                            forwardProgress(data)
+                        }
                     }
                     stderrHandle.readabilityHandler = { handle in
                         let data = handle.availableData
-                        if !data.isEmpty { stderrBuf.append(data) }
+                        if !data.isEmpty {
+                            stderrBuf.append(data)
+                            lastActivity.update()
+                            forwardProgress(data)
+                        }
                     }
 
                     self?.processLock.lock()
@@ -923,23 +1103,20 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // Dynamic timeout: 2x audio duration, minimum 120s (covers model download on first run)
-                    var audioTimeout: TimeInterval = 120
-                    if let audioFile = try? AVAudioFile(forReading: fileURL) {
-                        let durationSeconds = Double(audioFile.length) / audioFile.processingFormat.sampleRate
-                        audioTimeout = max(120, durationSeconds * 2.0)
-                    }
-                    let timeoutItem = DispatchWorkItem {
-                        if process.isRunning {
+                    // Smart idle timeout: kill if no output for 120s.
+                    // While downloading (output active), wait indefinitely.
+                    let timeoutCheck = DispatchSource.makeTimerSource(queue: .global())
+                    timeoutCheck.schedule(deadline: .now() + 10, repeating: 10)
+                    timeoutCheck.setEventHandler {
+                        if lastActivity.elapsed() > 120 && process.isRunning {
                             process.terminate()
                         }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + audioTimeout, execute: timeoutItem)
+                    timeoutCheck.resume()
 
                     process.waitUntilExit()
-                    timeoutItem.cancel()
+                    timeoutCheck.cancel()
 
-                    // Stop reading handlers
                     stdoutHandle.readabilityHandler = nil
                     stderrHandle.readabilityHandler = nil
 
@@ -947,19 +1124,28 @@ final class ColiASRService: @unchecked Sendable {
                     self?.currentProcess = nil
                     self?.processLock.unlock()
 
-                    guard process.terminationReason != .uncaughtSignal else {
-                        throw TypeNoError.transcriptionFailed("Transcription timed out")
-                    }
-
                     let output = String(data: stdoutBuf.read(), encoding: .utf8) ?? ""
                     let errorOutput = String(data: stderrBuf.read(), encoding: .utf8) ?? ""
+
+                    guard process.terminationReason != .uncaughtSignal else {
+                        // Check if crash was due to corrupt model
+                        if errorOutput.contains("protobuf") || errorOutput.contains("Failed to load model") {
+                            throw TypeNoError.transcriptionFailed("Failed to load model")
+                        }
+                        throw TypeNoError.transcriptionFailed("Transcription timed out")
+                    }
 
                     guard process.terminationStatus == 0 else {
                         let msg = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
                         throw TypeNoError.transcriptionFailed(msg.isEmpty ? "coli failed" : msg)
                     }
 
-                    continuation.resume(returning: output.trimmingCharacters(in: .whitespacesAndNewlines))
+                    // Extract actual transcription from stdout (skip \r progress lines)
+                    let realLines = output.components(separatedBy: "\n")
+                        .map { $0.components(separatedBy: "\r").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+                        .filter { !$0.isEmpty }
+                    let result = realLines.last ?? ""
+                    continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
                 }
