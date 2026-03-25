@@ -1016,7 +1016,7 @@ final class ColiASRService: @unchecked Sendable {
                             if let pctRange = line.range(of: #"[\d.]+"#, options: .regularExpression, range: (line.range(of: "(")?.upperBound ?? line.startIndex)..<line.endIndex),
                                let pct = Double(line[pctRange]) {
                                 let elapsed = lastReportedPct.elapsed()
-                                guard elapsed > 0.5 else { return }
+                                guard elapsed > 1.0 else { return }
                                 lastReportedPct.update()
                             }
                             display = line.replacingOccurrences(of: "...", with: "")
