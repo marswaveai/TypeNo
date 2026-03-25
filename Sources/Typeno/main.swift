@@ -948,41 +948,45 @@ final class ColiASRService: @unchecked Sendable {
                     // Track last activity — reset on any stderr output (download progress)
                     let lastActivity = AtomicTimestamp()
 
+                    // Parse progress from a chunk of output (may contain \r-separated lines)
+                    @Sendable func parseProgress(_ data: Data) {
+                        guard let onProgress, let text = String(data: data, encoding: .utf8) else { return }
+                        // coli uses \r to overwrite progress lines; take the last segment
+                        let line = text.components(separatedBy: "\r").last?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        guard !line.isEmpty else { return }
+
+                        let display: String
+                        if line.contains("MB") && line.contains("%") {
+                            display = line
+                        } else if line.contains("Downloading") {
+                            display = line
+                        } else if line.contains("Extracting") {
+                            display = "Extracting model..."
+                        } else if line.contains("ready") {
+                            display = "Model ready"
+                        } else {
+                            return  // Not a progress line, skip
+                        }
+                        Task { @MainActor in
+                            onProgress(display)
+                        }
+                    }
+
                     stdoutHandle.readabilityHandler = { handle in
                         let data = handle.availableData
-                        if !data.isEmpty { stdoutBuf.append(data) }
+                        if !data.isEmpty {
+                            stdoutBuf.append(data)
+                            lastActivity.update()
+                            parseProgress(data)
+                        }
                     }
                     stderrHandle.readabilityHandler = { handle in
                         let data = handle.availableData
                         if !data.isEmpty {
                             stderrBuf.append(data)
                             lastActivity.update()
-
-                            // Parse download progress from stderr and report
-                            if let onProgress, let text = String(data: data, encoding: .utf8) {
-                                // coli outputs lines like: "  42.5 MB / 155.5 MB (27.3%)"
-                                // or "Downloading sherpa-onnx-sense-voice..."
-                                // or "Extracting..."
-                                let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                                if !line.isEmpty {
-                                    let display: String
-                                    if line.contains("MB") && line.contains("%") {
-                                        // Extract progress like "42.5 MB / 155.5 MB (27.3%)"
-                                        display = "Downloading model: \(line)"
-                                    } else if line.contains("Downloading") {
-                                        display = line
-                                    } else if line.contains("Extracting") {
-                                        display = "Extracting model..."
-                                    } else if line.contains("ready") {
-                                        display = "Model ready"
-                                    } else {
-                                        display = line
-                                    }
-                                    Task { @MainActor in
-                                        onProgress(display)
-                                    }
-                                }
-                            }
+                            parseProgress(data)
                         }
                     }
 
@@ -1026,7 +1030,13 @@ final class ColiASRService: @unchecked Sendable {
                         throw TypeNoError.transcriptionFailed(msg.isEmpty ? "coli failed" : msg)
                     }
 
-                    continuation.resume(returning: output.trimmingCharacters(in: .whitespacesAndNewlines))
+                    // stdout may contain download progress before the actual result
+                    // The transcription is always the last non-empty line
+                    let lines = output.components(separatedBy: .newlines)
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty && !$0.contains("MB /") && !$0.contains("Downloading") && !$0.contains("Extracting") && !$0.contains("ready.") }
+                    let result = lines.last ?? ""
+                    continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
                 }
