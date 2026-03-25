@@ -353,7 +353,8 @@ final class AppState: ObservableObject {
         do {
             let text = try await asrService.transcribe(fileURL: url)
             progressTimer.invalidate()
-            transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            transcript = HotwordsManager.shared.correct(raw)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
@@ -437,7 +438,8 @@ final class AppState: ObservableObject {
         do {
             let text = try await asrService.transcribe(fileURL: url)
             progressTimer.invalidate()
-            transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            transcript = HotwordsManager.shared.correct(raw)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
@@ -1097,6 +1099,87 @@ final class ColiASRService: @unchecked Sendable {
         } catch {
             return nil
         }
+    }
+}
+
+// MARK: - Hotwords Manager
+
+@MainActor
+final class HotwordsManager: ObservableObject {
+    static let shared = HotwordsManager()
+
+    @Published var hotwords: [String] = []
+
+    private let fileURL: URL
+
+    private init() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".typeno", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        fileURL = dir.appendingPathComponent("hotwords.txt")
+        load()
+    }
+
+    func load() {
+        guard let data = try? String(contentsOf: fileURL, encoding: .utf8) else { return }
+        hotwords = data.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    func save() {
+        let content = hotwords.joined(separator: "\n")
+        try? content.write(to: fileURL, atomically: true, encoding: .utf8)
+    }
+
+    func add(_ word: String) {
+        let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !hotwords.contains(trimmed) else { return }
+        hotwords.append(trimmed)
+        save()
+    }
+
+    func remove(at offsets: IndexSet) {
+        hotwords.remove(atOffsets: offsets)
+        save()
+    }
+
+    func remove(_ word: String) {
+        hotwords.removeAll { $0 == word }
+        save()
+    }
+
+    /// Post-processing correction: character-level fuzzy match.
+    /// For each hotword (length >= 2), if it does not already appear in the text,
+    /// slide a window of the same character count and replace substrings that
+    /// differ by exactly 1 character.
+    func correct(_ text: String) -> String {
+        var result = text
+        for hotword in hotwords {
+            let hwChars = Array(hotword)
+            guard hwChars.count >= 2 else { continue }
+            if result.contains(hotword) { continue }
+
+            var chars = Array(result)
+            let windowSize = hwChars.count
+            guard chars.count >= windowSize else { continue }
+
+            var i = chars.count - windowSize
+            while i >= 0 {
+                let window = Array(chars[i..<(i + windowSize)])
+                var diffCount = 0
+                for j in 0..<windowSize {
+                    if window[j] != hwChars[j] { diffCount += 1 }
+                    if diffCount > 1 { break }
+                }
+                if diffCount == 1 {
+                    chars.replaceSubrange(i..<(i + windowSize), with: hwChars)
+                }
+                i -= 1
+            }
+            result = String(chars)
+        }
+        return result
     }
 }
 
