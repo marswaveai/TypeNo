@@ -247,6 +247,16 @@ final class AppState: ObservableObject {
     private let asrService = ColiASRService()
     private var currentRecordingURL: URL?
     private var previousApp: NSRunningApplication?
+    private var spectrumCancellable: AnyCancellable?
+
+    init() {
+        // Forward recorder's spectrumData changes to trigger SwiftUI updates
+        spectrumCancellable = recorder.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.objectWillChange.send()
+            }
+        }
+    }
 
     func startRecording() throws {
         transcript = ""
