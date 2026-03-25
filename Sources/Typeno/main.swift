@@ -1081,12 +1081,16 @@ final class ColiASRService: @unchecked Sendable {
                     self?.currentProcess = nil
                     self?.processLock.unlock()
 
-                    guard process.terminationReason != .uncaughtSignal else {
-                        throw TypeNoError.transcriptionFailed("Transcription timed out")
-                    }
-
                     let output = String(data: stdoutBuf.read(), encoding: .utf8) ?? ""
                     let errorOutput = String(data: stderrBuf.read(), encoding: .utf8) ?? ""
+
+                    guard process.terminationReason != .uncaughtSignal else {
+                        // Check if crash was due to corrupt model
+                        if errorOutput.contains("protobuf") || errorOutput.contains("Failed to load model") {
+                            throw TypeNoError.transcriptionFailed("Failed to load model")
+                        }
+                        throw TypeNoError.transcriptionFailed("Transcription timed out")
+                    }
 
                     guard process.terminationStatus == 0 else {
                         let msg = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
