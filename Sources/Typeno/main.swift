@@ -280,7 +280,6 @@ final class AppState: ObservableObject {
             } else {
                 progress = 0
                 display = message.replacingOccurrences(of: "...", with: "")
-                    .replacingOccurrences(of: ".", with: "")
                     .trimmingCharacters(in: .whitespaces)
             }
             phase = .downloadingModel(progress: progress, text: display)
@@ -297,8 +296,7 @@ final class AppState: ObservableObject {
             try await asrService.downloadModel { [weak self] message in
                 self?.handleProgressMessage(message)
             }
-            // Model ready, start recording
-            phase = .idle
+            // Model ready, start recording directly (skip .idle to avoid flicker)
             try startRecording()
         } catch {
             showError("Model download failed: \(error.localizedDescription)")
@@ -517,14 +515,19 @@ final class AppState: ObservableObject {
             progressTimer.invalidate()
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
-                // Model corrupt — re-download then retry this file
+                // Model corrupt — re-download then retry once
                 ColiASRService.deleteModelDirectory()
                 phase = .downloadingModel(progress: 0, text: "Checking model")
                 do {
                     try await asrService.downloadModel { [weak self] message in
                         self?.handleProgressMessage(message)
                     }
-                    await transcribeFile(url)
+                    // Retry transcription once (no recursion)
+                    phase = .transcribing()
+                    let retryText = try await asrService.transcribe(fileURL: url)
+                    transcript = retryText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !transcript.isEmpty { confirmInsert() }
+                    else { showError("No speech detected") }
                 } catch {
                     showError("Model download failed")
                 }
