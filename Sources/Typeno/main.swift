@@ -287,11 +287,8 @@ final class AppState: ObservableObject {
                 self?.handleProgressMessage(message)
             }
         } catch {
-            // If user canceled (phase is already .idle), don't show error
-            guard case .idle = phase else {
-                showError("Model download failed: \(error.localizedDescription)")
-                return
-            }
+            guard !cancelled else { return }
+            showError("Model download failed: \(error.localizedDescription)")
             return
         }
 
@@ -1047,14 +1044,12 @@ final class ColiASRService: @unchecked Sendable {
                         guard !line.isEmpty else { return }
 
                         // Only forward progress-related lines, pass data as-is
-                        if line.contains("MB") && line.contains("%") {
-                            if let pctRange = line.range(of: #"[\d.]+"#, options: .regularExpression, range: (line.range(of: "(")?.upperBound ?? line.startIndex)..<line.endIndex),
-                               let pct = Double(line[pctRange]) {
-                                let elapsed = lastReportedPct.elapsed()
-                                guard elapsed > 1.0 else { return }
-                                lastReportedPct.update()
-                            }
-                        } else if !line.contains("Downloading") && !line.contains("Extracting") && !line.contains("ready") {
+                        // Throttle all progress updates to max once per second
+                        if line.contains("MB") || line.contains("Downloading") || line.contains("Extracting") || line.contains("ready") {
+                            let elapsed = lastReportedPct.elapsed()
+                            guard elapsed > 1.0 else { return }
+                            lastReportedPct.update()
+                        } else {
                             return
                         }
                         Task { @MainActor in
@@ -1123,12 +1118,17 @@ final class ColiASRService: @unchecked Sendable {
                         throw TypeNoError.transcriptionFailed(msg.isEmpty ? "coli failed" : msg)
                     }
 
-                    // stdout may contain download progress before the actual result
-                    // The transcription is always the last non-empty line
-                    let lines = output.components(separatedBy: .newlines)
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty && !$0.contains("MB /") && !$0.contains("Downloading") && !$0.contains("Extracting") && !$0.contains("ready.") }
-                    let result = lines.last ?? ""
+                    // stdout may contain download progress (uses \r for overwriting).
+                    // Split by \n to get real lines, then take the last \r-segment of each
+                    // (progress lines are \r-separated, transcription result is the final \n-line)
+                    let realLines = output.components(separatedBy: "\n")
+                        .map { line in
+                            // Take last \r segment (skips progress overwrites)
+                            line.components(separatedBy: "\r").last?
+                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        }
+                        .filter { !$0.isEmpty }
+                    let result = realLines.last ?? ""
                     continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
