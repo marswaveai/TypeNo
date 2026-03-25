@@ -90,6 +90,10 @@ The app will be at `dist/TypeNo.app`. Move it to `/Applications/` for persistent
 
 TypeNo does one thing: voice → text → paste. No extra UI, no preferences, no configuration. The fastest way to type is to not type at all.
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=marswaveai/TypeNo&type=Date)](https://star-history.com/#marswaveai/TypeNo&Date)
+
 ## License
 
 GNU General Public License v3.0

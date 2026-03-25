@@ -85,6 +85,10 @@ scripts/build_app.sh
 
 TypeNo がやることはひとつだけ：音声 → テキスト → ペースト。余計な UI なし、設定なし、構成不要。最速のタイピングは、タイピングしないこと。
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=marswaveai/TypeNo&type=Date)](https://star-history.com/#marswaveai/TypeNo&Date)
+
 ## ライセンス
 
 GNU General Public License v3.0
