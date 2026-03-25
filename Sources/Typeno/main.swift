@@ -1151,35 +1151,28 @@ final class HotwordsManager: ObservableObject {
         save()
     }
 
-    /// Post-processing correction: character-level fuzzy match.
-    /// For each hotword (length >= 2), if it does not already appear in the text,
-    /// slide a window of the same character count and replace substrings that
-    /// differ by exactly 1 character.
+    /// Post-processing correction using replacement pairs.
+    /// Each entry can be either:
+    ///   - A single word (hotword): no correction applied, just for future use
+    ///   - A pair "wrong→right" or "wrong->right": replaces wrong with right
+    /// Example: "你号→你好" will replace "你号" with "你好" in ASR output.
     func correct(_ text: String) -> String {
         var result = text
-        for hotword in hotwords {
-            let hwChars = Array(hotword)
-            guard hwChars.count >= 2 else { continue }
-            if result.contains(hotword) { continue }
-
-            var chars = Array(result)
-            let windowSize = hwChars.count
-            guard chars.count >= windowSize else { continue }
-
-            var i = chars.count - windowSize
-            while i >= 0 {
-                let window = Array(chars[i..<(i + windowSize)])
-                var diffCount = 0
-                for j in 0..<windowSize {
-                    if window[j] != hwChars[j] { diffCount += 1 }
-                    if diffCount > 1 { break }
-                }
-                if diffCount == 1 {
-                    chars.replaceSubrange(i..<(i + windowSize), with: hwChars)
-                }
-                i -= 1
+        for entry in hotwords {
+            // Support "wrong→right" or "wrong->right" format
+            let parts: [String]
+            if entry.contains("→") {
+                parts = entry.components(separatedBy: "→")
+            } else if entry.contains("->") {
+                parts = entry.components(separatedBy: "->")
+            } else {
+                continue  // Single word, no replacement rule
             }
-            result = String(chars)
+            guard parts.count == 2 else { continue }
+            let wrong = parts[0].trimmingCharacters(in: .whitespaces)
+            let right = parts[1].trimmingCharacters(in: .whitespaces)
+            guard !wrong.isEmpty, !right.isEmpty else { continue }
+            result = result.replacingOccurrences(of: wrong, with: right)
         }
         return result
     }
@@ -1920,7 +1913,7 @@ struct HotwordsSettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                TextField("Add hotword...", text: $newWord)
+                TextField("错误词→正确词", text: $newWord)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { addWord() }
                 Button(action: addWord) {
@@ -1938,9 +1931,9 @@ struct HotwordsSettingsView: View {
                     Image(systemName: "text.book.closed")
                         .font(.system(size: 36))
                         .foregroundColor(.secondary)
-                    Text("No hotwords yet")
+                    Text("No correction rules yet")
                         .font(.headline)
-                    Text("Add words that should be preserved exactly as spelled during transcription.")
+                    Text("Add replacement rules like:\n你号→你好\nASR will auto-correct matching text.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
