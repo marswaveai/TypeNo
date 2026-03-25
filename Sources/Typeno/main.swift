@@ -268,20 +268,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.phase = .updating(L("Checking for updates...", "检查更新..."))
             appState.onOverlayRequest?(true)
 
-            guard let release = await updateService.checkForUpdate() else {
+            switch await updateService.checkForUpdateDetailed() {
+            case .upToDate:
                 appState.phase = .updating(L("Already up to date", "已是最新版本"))
                 try? await Task.sleep(for: .seconds(2))
                 appState.phase = .idle
                 appState.onOverlayRequest?(false)
-                return
-            }
 
-            do {
-                try await updateService.downloadAndInstall(from: release.downloadURL) { message in
-                    self.appState.phase = .updating(message)
+            case .rateLimited:
+                appState.showError(L("GitHub rate limit — try again later", "GitHub 请求限制，请稍后重试"))
+
+            case .failed:
+                appState.showError(L("Could not check for updates", "无法检查更新"))
+
+            case .updateAvailable(let release):
+                do {
+                    try await updateService.downloadAndInstall(from: release.downloadURL) { message in
+                        self.appState.phase = .updating(message)
+                    }
+                } catch {
+                    appState.showError(L("Update failed", "更新失败") + ": \(error.localizedDescription)")
                 }
-            } catch {
-                appState.showError(L("Update failed", "更新失败") + ": \(error.localizedDescription)")
             }
         }
     }
@@ -1709,37 +1716,60 @@ final class UpdateService: @unchecked Sendable {
         let downloadURL: URL
     }
 
+    enum CheckResult {
+        case updateAvailable(ReleaseInfo)
+        case upToDate
+        case rateLimited
+        case failed
+    }
+
     func checkForUpdate() async -> ReleaseInfo? {
+        switch await checkForUpdateDetailed() {
+        case .updateAvailable(let info): return info
+        default: return nil
+        }
+    }
+
+    func checkForUpdateDetailed() async -> CheckResult {
         guard let url = URL(string: "https://api.github.com/repos/\(Self.repoOwner)/\(Self.repoName)/releases/latest") else {
-            return nil
+            return .failed
         }
 
         do {
             var request = URLRequest(url: url)
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            request.setValue("TypeNo/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0")", forHTTPHeaderField: "User-Agent")
             let (data, _) = try await URLSession.shared.data(for: request)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tagName = json["tag_name"] as? String,
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return .failed
+            }
+
+            // GitHub rate limit error
+            if json["message"] as? String != nil && json["tag_name"] == nil {
+                return .rateLimited
+            }
+
+            guard let tagName = json["tag_name"] as? String,
                   let assets = json["assets"] as? [[String: Any]] else {
-                return nil
+                return .failed
             }
 
             let remoteVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
             let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
 
             guard Self.isNewer(remote: remoteVersion, current: currentVersion) else {
-                return nil
+                return .upToDate
             }
 
             guard let asset = assets.first(where: { ($0["name"] as? String) == Self.assetName }),
                   let downloadURLString = asset["browser_download_url"] as? String,
                   let downloadURL = URL(string: downloadURLString) else {
-                return nil
+                return .failed
             }
 
-            return ReleaseInfo(version: remoteVersion, downloadURL: downloadURL)
+            return .updateAvailable(ReleaseInfo(version: remoteVersion, downloadURL: downloadURL))
         } catch {
-            return nil
+            return .failed
         }
     }
 
