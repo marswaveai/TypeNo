@@ -2,8 +2,7 @@
 
 [中文](README_CN.md) | [日本語](README_JP.md)
 
-> A free, open source, privacy-first voice input tool for macOS.
-> Press Control, speak, done.
+**A free, open source, privacy-first voice input tool for macOS.**
 
 ![TypeNo hero image](assets/hero.webp)
 

@@ -2,8 +2,7 @@
 
 [English](README.md) | [中文](README_CN.md)
 
-> 無料・オープンソース・プライバシー優先の macOS 音声入力ツール。
-> Control を押して、話して、完了。
+**無料・オープンソース・プライバシー優先の macOS 音声入力ツール。**
 
 ![TypeNo hero image](assets/hero.webp)
 

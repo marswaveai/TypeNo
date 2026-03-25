@@ -2,8 +2,7 @@
 
 [English](README.md) | [日本語](README_JP.md)
 
-> 免费、开源、隐私优先的 macOS 语音输入工具。
-> 按下 Control，说话，完成。
+**免费、开源、隐私优先的 macOS 语音输入工具。**
 
 ![TypeNo 宣传图](assets/hero.webp)
 
