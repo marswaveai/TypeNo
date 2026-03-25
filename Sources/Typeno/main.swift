@@ -206,7 +206,7 @@ enum PermissionKind: CaseIterable, Hashable {
 
 enum AppPhase: Equatable {
     case idle
-    case downloadingModel(String)  // model download progress
+    case downloadingModel(progress: Double, text: String)  // 0.0-1.0, "42.5 / 155.5 MB"
     case recording
     case transcribing(String = "Transcribing...")
     case done(String)        // transcription result, waiting for user confirm
@@ -219,7 +219,7 @@ enum AppPhase: Equatable {
     var subtitle: String {
         switch self {
         case .idle: "Press Fn to start"
-        case .downloadingModel(let message): message
+        case .downloadingModel(_, let text): text
         case .recording: "Listening..."
         case .transcribing(let message): message
         case .done(let text): text
@@ -259,11 +259,29 @@ final class AppState: ObservableObject {
     }
 
     func downloadModelThenRecord() async {
-        phase = .downloadingModel("Checking model...")
+        phase = .downloadingModel(progress: 0, text: "Checking model...")
 
         do {
             try await asrService.downloadModel { [weak self] message in
-                self?.phase = .downloadingModel(message)
+                // Parse "42.5 MB / 155.5 MB (27.3%)" into progress + text
+                let progress: Double
+                let display: String
+                if let pctRange = message.range(of: #"\([\d.]+%\)"#, options: .regularExpression),
+                   let pctVal = Double(message[pctRange].dropFirst().dropLast().replacingOccurrences(of: "%", with: "")) {
+                    progress = pctVal / 100.0
+                    // Extract "42.5 / 155.5 MB"
+                    let parts = message.components(separatedBy: "(")[0]
+                        .trimmingCharacters(in: .whitespaces)
+                        .replacingOccurrences(of: " MB / ", with: " / ")
+                    display = parts + " MB"
+                } else if message.contains("Extracting") {
+                    progress = 1.0
+                    display = "Extracting..."
+                } else {
+                    progress = 0
+                    display = message
+                }
+                self?.phase = .downloadingModel(progress: progress, text: display)
             }
             // Model ready, start recording
             phase = .idle
@@ -948,16 +966,26 @@ final class ColiASRService: @unchecked Sendable {
                     // Track last activity — reset on any stderr output (download progress)
                     let lastActivity = AtomicTimestamp()
 
+                    // Throttle: only update UI when percentage changes by >= 1%
+                    let lastReportedPct = AtomicTimestamp()  // reuse as atomic double storage
+
                     // Parse progress from a chunk of output (may contain \r-separated lines)
                     @Sendable func parseProgress(_ data: Data) {
                         guard let onProgress, let text = String(data: data, encoding: .utf8) else { return }
-                        // coli uses \r to overwrite progress lines; take the last segment
                         let line = text.components(separatedBy: "\r").last?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         guard !line.isEmpty else { return }
 
                         let display: String
                         if line.contains("MB") && line.contains("%") {
+                            // Throttle: skip if percentage hasn't changed enough
+                            if let pctRange = line.range(of: #"[\d.]+"#, options: .regularExpression, range: (line.range(of: "(")?.upperBound ?? line.startIndex)..<line.endIndex),
+                               let pct = Double(line[pctRange]) {
+                                let elapsed = lastReportedPct.elapsed()
+                                // Update at most every 0.5s
+                                guard elapsed > 0.5 else { return }
+                                lastReportedPct.update()
+                            }
                             display = line
                         } else if line.contains("Downloading") {
                             display = line
@@ -966,7 +994,7 @@ final class ColiASRService: @unchecked Sendable {
                         } else if line.contains("ready") {
                             display = "Model ready"
                         } else {
-                            return  // Not a progress line, skip
+                            return
                         }
                         Task { @MainActor in
                             onProgress(display)
@@ -1343,7 +1371,7 @@ final class StatusItemController: NSObject {
     private func updateTitle(for phase: AppPhase) {
         statusItem.button?.title = switch phase {
         case .idle: "⌃"
-        case .downloadingModel: "↓"
+        case .downloadingModel: "⇣"
         case .recording: "Rec"
         case .transcribing: "..."
         case .done: "✓"
@@ -1557,10 +1585,26 @@ struct OverlayView: View {
                     spectrumView
                     raisedCircleButton("checkmark", primary: true) { appState.onToggleRequest?() }
                 }
-            } else if case .downloadingModel(let message) = appState.phase {
+            } else if case .downloadingModel(let progress, let text) = appState.phase {
                 HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(message).font(.system(size: 12)).foregroundStyle(.primary).lineLimit(1)
+                    // Circular progress ring like App Store
+                    ZStack {
+                        Circle()
+                            .stroke(Color.primary.opacity(0.15), lineWidth: 2.5)
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(Color.primary, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear(duration: 0.3), value: progress)
+                    }
+                    .frame(width: 18, height: 18)
+
+                    Text(text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .frame(width: 120, alignment: .leading)
+
                     raisedCircleButton("xmark") { appState.onCancel?() }
                 }
             } else if case .transcribing(let message) = appState.phase {
