@@ -577,46 +577,50 @@ final class AudioEngine: ObservableObject {
         }
 
         let tapBufferSize: AVAudioFrameCount = 4096
-        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat) {
-            [weak self] buffer, _ in
-            guard let self else { return }
 
+        // Capture non-isolated references for the audio thread callback
+        nonisolated(unsafe) let weakSelf = self
+        nonisolated(unsafe) let capturedFile = file
+        nonisolated(unsafe) let capturedConverter = converter
+        let capturedTargetFormat = targetFormat
+        let capturedInputSampleRate = inputFormat.sampleRate
+
+        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat) { buffer, _ in
             // Compute spectrum from input buffer (native sample rate)
-            let spectrum = self.computeSpectrum(buffer: buffer)
+            let spectrum = weakSelf.computeSpectrum(buffer: buffer)
 
             // Convert to 16 kHz mono and write to file
             let frameCapacity = AVAudioFrameCount(
-                Double(buffer.frameLength) * 16_000 / inputFormat.sampleRate
+                Double(buffer.frameLength) * 16_000 / capturedInputSampleRate
             )
             guard frameCapacity > 0,
-                  let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCapacity + 16) else {
+                  let convertedBuffer = AVAudioPCMBuffer(pcmFormat: capturedTargetFormat, frameCapacity: frameCapacity + 16) else {
                 return
             }
 
             var error: NSError?
-            nonisolated(unsafe) var allConsumed = false
-            nonisolated(unsafe) let inputBuffer = buffer
-            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+            var allConsumed = false
+            capturedConverter.convert(to: convertedBuffer, error: &error) { _, outStatus in
                 if allConsumed {
                     outStatus.pointee = .noDataNow
                     return nil
                 }
                 allConsumed = true
                 outStatus.pointee = .haveData
-                return inputBuffer
+                return buffer
             }
 
             if error == nil, convertedBuffer.frameLength > 0 {
                 do {
-                    try file.write(from: convertedBuffer)
+                    try capturedFile.write(from: convertedBuffer)
                 } catch {
                     // Silently skip write errors during recording
                 }
             }
 
             // Publish spectrum on main thread
-            Task { @MainActor [spectrum] in
-                self.spectrumData = spectrum
+            Task { @MainActor in
+                weakSelf.spectrumData = spectrum
             }
         }
 
