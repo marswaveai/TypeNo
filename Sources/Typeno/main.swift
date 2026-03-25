@@ -555,18 +555,18 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        // Target format: 16 kHz mono PCM for ASR
+        // Target format: 16 kHz mono Int16 PCM for ASR (sherpa-onnx expects s16le)
         guard let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
+            commonFormat: .pcmFormatInt16,
             sampleRate: 16_000,
             channels: 1,
-            interleaved: false
+            interleaved: true
         ) else {
             throw TypeNoError.noRecording
         }
 
-        // Create output file in 16 kHz mono WAV format
-        let file = try AVAudioFile(forWriting: url, settings: targetFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        // Create output file in 16 kHz mono s16le WAV format
+        let file = try AVAudioFile(forWriting: url, settings: targetFormat.settings)
         self.outputFile = file
 
         // Create converter from input format to 16 kHz mono
