@@ -32,14 +32,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleToggle()
         }
 
-        appState.onOverlayRequest = { [weak self] visible in
-            if visible {
-                self?.overlayController?.show()
-            } else {
-                self?.overlayController?.hide()
-            }
-        }
-
         appState.onPermissionOpen = { [weak self] kind in
             self?.openPermissionSettings(for: kind)
         }
@@ -155,11 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performUpdate() {
         Task {
             appState.phase = .updating("Checking for updates...")
-            appState.onOverlayRequest?(true)
 
             guard let release = await updateService.checkForUpdate() else {
                 appState.phase = .idle
-                appState.onOverlayRequest?(false)
                 // Show brief "up to date" message
                 appState.showError("Already up to date")
                 return
@@ -235,7 +225,6 @@ final class AppState: ObservableObject {
     @Published var phase: AppPhase = .idle
     @Published var transcript = ""
 
-    var onOverlayRequest: ((Bool) -> Void)?
     var onPermissionOpen: ((PermissionKind) -> Void)?
     var onColiInstallHelpRequest: (() -> Void)?
     var onCancel: (() -> Void)?
@@ -262,13 +251,13 @@ final class AppState: ObservableObject {
         previousApp = NSWorkspace.shared.frontmostApplication
         currentRecordingURL = try recorder.start()
         phase = .recording
-        onOverlayRequest?(true)
+
     }
 
     func stopRecording() {
         currentRecordingURL = recorder.stop()
         phase = .transcribing()
-        onOverlayRequest?(true)
+
     }
 
     func cancel() {
@@ -280,17 +269,17 @@ final class AppState: ObservableObject {
         currentRecordingURL = nil
         transcript = ""
         phase = .idle
-        onOverlayRequest?(false)
+
     }
 
     func showPermissions(_ missing: Set<PermissionKind>) {
         phase = .permissions(missing)
-        onOverlayRequest?(true)
+
     }
 
     func hidePermissions() {
         phase = .idle
-        onOverlayRequest?(false)
+
     }
 
     func showMissingColi() {
@@ -299,13 +288,13 @@ final class AppState: ObservableObject {
             autoInstallColi()
         } else {
             phase = .missingColi
-            onOverlayRequest?(true)
+    
         }
     }
 
     func autoInstallColi() {
         phase = .installingColi("Installing coli...")
-        onOverlayRequest?(true)
+
 
         Task {
             do {
@@ -315,7 +304,7 @@ final class AppState: ObservableObject {
                 // Verify installation
                 if ColiASRService.isInstalled {
                     phase = .idle
-                    onOverlayRequest?(false)
+            
                 } else {
                     // Fallback to manual guidance
                     phase = .missingColi
@@ -329,13 +318,13 @@ final class AppState: ObservableObject {
     func hideColiGuidance() {
         if case .missingColi = phase {
             phase = .idle
-            onOverlayRequest?(false)
+    
         }
     }
 
     func showError(_ message: String) {
         phase = .error(message)
-        onOverlayRequest?(true)
+
     }
 
     func transcribeAndInsert() async {
@@ -370,7 +359,7 @@ final class AppState: ObservableObject {
 
             // Show result briefly, then auto-insert
             phase = .done(transcript)
-            onOverlayRequest?(true)
+    
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
             progressTimer.invalidate()
@@ -395,7 +384,7 @@ final class AppState: ObservableObject {
         NSPasteboard.general.setString(text, forType: .string)
 
         // Hide overlay
-        onOverlayRequest?(false)
+
 
         // Activate previous app, then Cmd+V
         if let targetApp {
@@ -423,13 +412,13 @@ final class AppState: ObservableObject {
         previousApp = nil
         transcript = ""
         phase = .idle
-        onOverlayRequest?(false)
+
     }
 
     func transcribeFile(_ url: URL) async {
         previousApp = NSWorkspace.shared.frontmostApplication
         phase = .transcribing()
-        onOverlayRequest?(true)
+
 
         let startTime = Date()
         let progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
@@ -453,7 +442,7 @@ final class AppState: ObservableObject {
             }
 
             phase = .done(transcript)
-            onOverlayRequest?(true)
+    
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
             progressTimer.invalidate()
@@ -1334,12 +1323,18 @@ final class OverlayPanelController {
         panel.hidesOnDeactivate = false
         panel.contentView = hostingView
 
-        // Re-layout on phase change so panel stays centered
-        phaseCancellable = appState.$phase.sink { [weak self] _ in
-            guard let self, self.panel.isVisible else { return }
+        // Single source of truth: phase drives show/hide/layout
+        phaseCancellable = appState.$phase.sink { [weak self] phase in
+            guard let self else { return }
             DispatchQueue.main.async {
-                DispatchQueue.main.async {
-                    self.updateLayout()
+                switch phase {
+                case .idle:
+                    self.hide()
+                default:
+                    DispatchQueue.main.async {
+                        self.updateLayout()
+                        self.panel.orderFrontRegardless()
+                    }
                 }
             }
         }
