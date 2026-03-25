@@ -543,6 +543,7 @@ final class AudioEngine: ObservableObject {
     private var outputFile: AVAudioFile?
 
     private let fftSize: Int = 1024
+    private nonisolated(unsafe) var fftSetup: FFTSetup?
 
     func start() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
@@ -628,6 +629,10 @@ final class AudioEngine: ObservableObject {
         engine?.stop()
         engine = nil
         outputFile = nil
+        if let setup = fftSetup {
+            vDSP_destroy_fftsetup(setup)
+            fftSetup = nil
+        }
         let url = recordingURL
         recordingURL = nil
         spectrumData = Array(repeating: 0, count: 20)
@@ -635,15 +640,10 @@ final class AudioEngine: ObservableObject {
     }
 
     func cancel() {
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
-        outputFile = nil
-        if let recordingURL {
-            try? FileManager.default.removeItem(at: recordingURL)
+        let url = stop()
+        if let url {
+            try? FileManager.default.removeItem(at: url)
         }
-        recordingURL = nil
-        spectrumData = Array(repeating: 0, count: 20)
     }
 
     // MARK: - FFT Spectrum
@@ -679,9 +679,11 @@ final class AudioEngine: ObservableObject {
 
                 // Forward FFT
                 let log2n = vDSP_Length(log2(Double(fftSize)))
-                if let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) {
-                    vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
-                    vDSP_destroy_fftsetup(fftSetup)
+                if self.fftSetup == nil {
+                    self.fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
+                }
+                if let setup = self.fftSetup {
+                    vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
                 }
 
                 // Compute magnitudes
@@ -706,7 +708,9 @@ final class AudioEngine: ObservableObject {
                     let clampedEnd = min(endBin, usableBins)
                     if startBin < clampedEnd {
                         var sum: Float = 0
-                        vDSP_meanv(Array(magnitudes[startBin..<clampedEnd]), 1, &sum, vDSP_Length(clampedEnd - startBin))
+                        magnitudes.withUnsafeBufferPointer { buf in
+                            vDSP_meanv(buf.baseAddress! + startBin, 1, &sum, vDSP_Length(clampedEnd - startBin))
+                        }
                         bars[i] = sum
                     }
                 }
