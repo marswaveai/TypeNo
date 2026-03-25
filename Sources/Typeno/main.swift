@@ -249,6 +249,8 @@ final class AppState: ObservableObject {
     private var currentRecordingURL: URL?
     private var previousApp: NSRunningApplication?
     private var spectrumCancellable: AnyCancellable?
+    private var cancelled = false
+    private var activeTimer: Timer?
 
     init() {
         spectrumCancellable = recorder.objectWillChange.sink { [weak self] _ in
@@ -284,14 +286,25 @@ final class AppState: ObservableObject {
             try await asrService.downloadModel { [weak self] message in
                 self?.handleProgressMessage(message)
             }
-            // Model ready, start recording directly (skip .idle to avoid flicker)
+        } catch {
+            // If user canceled (phase is already .idle), don't show error
+            guard case .idle = phase else {
+                showError("Model download failed: \(error.localizedDescription)")
+                return
+            }
+            return
+        }
+
+        // Model ready, start recording
+        do {
             try startRecording()
         } catch {
-            showError("Model download failed: \(error.localizedDescription)")
+            showError("Recording failed: \(error.localizedDescription)")
         }
     }
 
     func startRecording() throws {
+        cancelled = false
         transcript = ""
         previousApp = NSWorkspace.shared.frontmostApplication
         currentRecordingURL = try recorder.start()
@@ -306,6 +319,9 @@ final class AppState: ObservableObject {
     }
 
     func cancel() {
+        cancelled = true
+        activeTimer?.invalidate()
+        activeTimer = nil
         recorder.cancel()
         asrService.cancelCurrentProcess()
         if let currentRecordingURL {
@@ -314,7 +330,6 @@ final class AppState: ObservableObject {
         currentRecordingURL = nil
         transcript = ""
         phase = .idle
-
     }
 
     func showPermissions(_ missing: Set<PermissionKind>) {
@@ -380,40 +395,49 @@ final class AppState: ObservableObject {
 
         phase = .transcribing()
 
-        // Progress timer: show elapsed time and warn near timeout
         let startTime = Date()
-        let progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                guard let self, !self.cancelled else { return }
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 100 {
-                    self?.phase = .transcribing("Timeout \(elapsed)s")
+                    self.phase = .transcribing("Timeout \(elapsed)s")
                 } else if elapsed >= 10 {
-                    self?.phase = .transcribing("Transcribing \(elapsed)s")
+                    self.phase = .transcribing("Transcribing \(elapsed)s")
                 }
             }
         }
+        activeTimer = timer
 
         do {
             let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
                 self?.handleProgressMessage(message)
             }
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeTimer = nil
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
             }
 
-            // Skip showing result in overlay — go straight to paste
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeTimer = nil
             showMissingColi()
         } catch {
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeTimer = nil
+            // If user cancelled, don't show error (phase already .idle)
+            guard !cancelled else { return }
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
-                // Model is corrupt — delete and trigger re-download
+                // Clean up failed recording before re-downloading
+                if let currentRecordingURL {
+                    try? FileManager.default.removeItem(at: currentRecordingURL)
+                }
+                currentRecordingURL = nil
                 ColiASRService.deleteModelDirectory()
                 await downloadModelThenRecord()
             } else {
@@ -468,27 +492,30 @@ final class AppState: ObservableObject {
     }
 
     func transcribeFile(_ url: URL) async {
+        cancelled = false
         previousApp = NSWorkspace.shared.frontmostApplication
         phase = .transcribing()
 
-
         let startTime = Date()
-        let progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                guard let self, !self.cancelled else { return }
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 100 {
-                    self?.phase = .transcribing("Timeout \(elapsed)s")
+                    self.phase = .transcribing("Timeout \(elapsed)s")
                 } else if elapsed >= 10 {
-                    self?.phase = .transcribing("Transcribing \(elapsed)s")
+                    self.phase = .transcribing("Transcribing \(elapsed)s")
                 }
             }
         }
+        activeTimer = timer
 
         do {
             let text = try await asrService.transcribe(fileURL: url) { [weak self] message in
                 self?.handleProgressMessage(message)
             }
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeTimer = nil
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
@@ -497,26 +524,29 @@ final class AppState: ObservableObject {
 
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeTimer = nil
             showMissingColi()
         } catch {
-            progressTimer.invalidate()
+            timer.invalidate()
+            activeTimer = nil
+            guard !cancelled else { return }
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
-                // Model corrupt — re-download then retry once
                 ColiASRService.deleteModelDirectory()
                 phase = .downloadingModel(progress: 0, text: "Checking model")
                 do {
                     try await asrService.downloadModel { [weak self] message in
                         self?.handleProgressMessage(message)
                     }
-                    // Retry transcription once (no recursion)
+                    guard !cancelled else { return }
                     phase = .transcribing()
                     let retryText = try await asrService.transcribe(fileURL: url)
                     transcript = retryText.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !transcript.isEmpty { confirmInsert() }
                     else { showError("No speech detected") }
                 } catch {
+                    guard !cancelled else { return }
                     showError("Model download failed")
                 }
             } else {
@@ -613,6 +643,7 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     private let fftSize: Int = 1024
     private var fftSetup: FFTSetup?
     private let fftLock = NSLock()
+    private var stopped = false
 
     func start() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
@@ -648,9 +679,11 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
             throw TypeNoError.noRecording
         }
 
+        stopped = false
+
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) {
             [weak self] buffer, _ in
-            guard let self else { return }
+            guard let self, !self.stopped else { return }
 
             let spectrum = self.computeSpectrum(buffer: buffer)
 
@@ -690,6 +723,7 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     }
 
     func stop() -> URL? {
+        stopped = true
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil
