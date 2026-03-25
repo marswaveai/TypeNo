@@ -1516,87 +1516,54 @@ struct OverlayView: View {
 
     private let barHeight: CGFloat = 32
 
+    private func raisedCircleButton(_ icon: String, primary: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+                Circle()
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(primary ? .primary : .secondary)
+            }
+            .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+    }
+
     var compactView: some View {
         Group {
             if case .recording = appState.phase {
                 HStack(spacing: 8) {
-                    // Cancel button — raised circle
-                    Button(action: { appState.onCancel?() }) {
-                        ZStack {
-                            Circle()
-                                .fill(.ultraThinMaterial)
-                                .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
-                            Circle()
-                                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
-                            Image(systemName: "xmark")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.plain)
-
+                    raisedCircleButton("xmark") { appState.onCancel?() }
                     spectrumView
-
-                    // Confirm button — raised circle
-                    Button(action: { appState.onToggleRequest?() }) {
-                        ZStack {
-                            Circle()
-                                .fill(.ultraThinMaterial)
-                                .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
-                            Circle()
-                                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.primary)
-                        }
-                        .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.plain)
+                    raisedCircleButton("checkmark", primary: true) { appState.onToggleRequest?() }
                 }
             } else if case .transcribing(let message) = appState.phase {
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(message)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.primary)
+                    ProgressView().controlSize(.small)
+                    Text(message).font(.system(size: 12)).foregroundStyle(.primary)
                 }
-                .frame(height: barHeight)
             } else if case .done(let text) = appState.phase {
                 HStack(spacing: 8) {
-                    Image(systemName: "doc.on.clipboard")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    Text(text)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
+                    Image(systemName: "doc.on.clipboard").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(text).font(.system(size: 12)).foregroundStyle(.primary).lineLimit(2)
                 }
-                .frame(height: barHeight)
             } else if case .error(let message) = appState.phase {
                 HStack(spacing: 8) {
-                    Text(message)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.primary)
-                    Button(action: { appState.onCancel?() }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 12))
-                    }
-                    .buttonStyle(.plain)
+                    Text(message).font(.system(size: 12)).foregroundStyle(.primary)
+                    raisedCircleButton("xmark") { appState.onCancel?() }
                 }
-                .frame(height: barHeight)
             } else if case .updating(let message) = appState.phase {
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(message)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.primary)
+                    ProgressView().controlSize(.small)
+                    Text(message).font(.system(size: 12)).foregroundStyle(.primary)
                 }
-                .frame(height: barHeight)
             }
         }
+        .frame(height: barHeight)
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
         .background(.ultraThinMaterial, in: Capsule())
