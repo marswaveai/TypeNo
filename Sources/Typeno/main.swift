@@ -261,30 +261,18 @@ final class AppState: ObservableObject {
     /// Route progress messages to the correct UI — download or transcription
     func handleProgressMessage(_ message: String) {
         if message.contains("MB") || message.contains("Downloading") || message.contains("Extracting") || message.contains("ready") {
-            // Model download progress → circular progress ring
+            // Model download progress → extract percentage for ring, pass text as-is
             let progress: Double
-            let display: String
             if let pctRange = message.range(of: #"\([\d.]+%\)"#, options: .regularExpression),
                let pctVal = Double(message[pctRange].dropFirst().dropLast().replacingOccurrences(of: "%", with: "")) {
                 progress = pctVal / 100.0
-                // "42.5 MB / 155.5 MB (27.3%)" → "42.5 / 155.5 MB"
-                let beforePct = message.components(separatedBy: "(")[0]
-                    .trimmingCharacters(in: .whitespaces)
-                let cleaned = beforePct
-                    .replacingOccurrences(of: " MB / ", with: " / ")
-                    .replacingOccurrences(of: " MB", with: "")
-                display = cleaned + " MB"
-            } else if message.contains("Extracting") {
+            } else if message.contains("Extracting") || message.contains("ready") {
                 progress = 1.0
-                display = "Extracting"
             } else {
                 progress = 0
-                display = message.replacingOccurrences(of: "...", with: "")
-                    .trimmingCharacters(in: .whitespaces)
             }
-            phase = .downloadingModel(progress: progress, text: display)
+            phase = .downloadingModel(progress: progress, text: message)
         } else {
-            // Normal transcription progress
             phase = .transcribing(message)
         }
     }
@@ -1024,29 +1012,19 @@ final class ColiASRService: @unchecked Sendable {
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         guard !line.isEmpty else { return }
 
-                        let display: String
+                        // Only forward progress-related lines, pass data as-is
                         if line.contains("MB") && line.contains("%") {
-                            // Throttle: skip if percentage hasn't changed enough
                             if let pctRange = line.range(of: #"[\d.]+"#, options: .regularExpression, range: (line.range(of: "(")?.upperBound ?? line.startIndex)..<line.endIndex),
                                let pct = Double(line[pctRange]) {
                                 let elapsed = lastReportedPct.elapsed()
                                 guard elapsed > 1.0 else { return }
                                 lastReportedPct.update()
                             }
-                            display = line.replacingOccurrences(of: "...", with: "")
-                        } else if line.contains("Downloading") {
-                            display = line.replacingOccurrences(of: "...", with: "")
-                        } else if line.contains("Extracting") {
-                            display = "Extracting model"
-                        } else if line.contains("ready") {
-                            display = "Model ready"
-                        } else {
+                        } else if !line.contains("Downloading") && !line.contains("Extracting") && !line.contains("ready") {
                             return
                         }
                         Task { @MainActor in
-                            let cleaned = display.replacingOccurrences(of: "...", with: "")
-                                .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
-                            onProgress(cleaned)
+                            onProgress(line)
                         }
                     }
 
@@ -1650,7 +1628,7 @@ struct OverlayView: View {
                     }
                     .frame(width: 18, height: 18)
 
-                    Text(text)
+                    Text(Self.formatDownloadText(text))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
@@ -1685,6 +1663,19 @@ struct OverlayView: View {
         .padding(.vertical, 6)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+    }
+
+    /// Format raw coli output for display — extract "42.5 / 155.5 MB" from progress lines
+    static func formatDownloadText(_ raw: String) -> String {
+        // "  42.5 MB / 155.5 MB (27.3%)" → "42.5 / 155.5 MB"
+        if raw.contains("MB") && raw.contains("%") {
+            let beforePct = raw.components(separatedBy: "(")[0].trimmingCharacters(in: .whitespaces)
+            return beforePct
+                .replacingOccurrences(of: " MB / ", with: " / ")
+                .replacingOccurrences(of: " MB", with: "") + " MB"
+        }
+        // Strip trailing dots for display only
+        return raw.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
     }
 
     var spectrumView: some View {
