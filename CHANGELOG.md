@@ -45,6 +45,20 @@
 - 改为 `OverlayPanelController` 通过 Combine 订阅 `phase` 变化，统一控制 show/hide/layout
 - 确保所有状态切换时 overlay 居中显示
 
+## 已知问题与修复记录
+
+### AudioEngine 停止时 EXC_BAD_ACCESS（已修复）
+
+引入 `AVAudioEngine` 后出现的新问题（原始 `AVAudioRecorder` 不存在此问题）。
+
+- **原因**：`stop()` 在主线程释放音频资源，但 `installTap` 的回调可能还在音频 IO 线程上运行，访问了已释放的 `file` 和 `converter`，导致 crash
+- **修复**：先调用 `engine.stop()` 停止音频 IO 线程，再调用 `removeTap`，并加入短暂延迟确保回调完成后再释放资源
+
+### @MainActor 与音频线程冲突（已修复）
+
+- **原因**：`AudioEngine` 最初标记为 `@MainActor`，但 `installTap` 回调在音频实时线程执行，Swift 6 严格并发检查触发 `dispatch_assert_queue_fail` crash
+- **修复**：将 `AudioEngine` 改为 `@unchecked Sendable`，频谱数据通过 `DispatchQueue.main.async` 发布到主线程
+
 ## 文件变更
 
 - `Sources/Typeno/main.swift` — 唯一修改文件（+284 / -128）
