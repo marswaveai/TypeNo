@@ -101,6 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.confirmInsert()
         case .transcribing, .error:
             appState.cancel()
+        case .downloadingModel:
+            appState.cancel()
         case .permissions, .missingColi, .installingColi, .updating:
             break
         }
@@ -115,6 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             permissionsGranted = true
+        }
+
+        // Check if model is ready before recording
+        if !ColiASRService.isModelReady {
+            Task { @MainActor in
+                await appState.downloadModelThenRecord()
+            }
+            return
         }
 
         do {
@@ -196,6 +206,7 @@ enum PermissionKind: CaseIterable, Hashable {
 
 enum AppPhase: Equatable {
     case idle
+    case downloadingModel(String)  // model download progress
     case recording
     case transcribing(String = "Transcribing...")
     case done(String)        // transcription result, waiting for user confirm
@@ -208,6 +219,7 @@ enum AppPhase: Equatable {
     var subtitle: String {
         switch self {
         case .idle: "Press Fn to start"
+        case .downloadingModel(let message): message
         case .recording: "Listening..."
         case .transcribing(let message): message
         case .done(let text): text
@@ -243,6 +255,21 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 self?.objectWillChange.send()
             }
+        }
+    }
+
+    func downloadModelThenRecord() async {
+        phase = .downloadingModel("Checking model...")
+
+        do {
+            try await asrService.downloadModel { [weak self] message in
+                self?.phase = .downloadingModel(message)
+            }
+            // Model ready, start recording
+            phase = .idle
+            try startRecording()
+        } catch {
+            showError("Model download failed: \(error.localizedDescription)")
         }
     }
 
@@ -748,6 +775,50 @@ private final class AtomicTimestamp: @unchecked Sendable {
 final class ColiASRService: @unchecked Sendable {
     static var isInstalled: Bool {
         findColiPath() != nil
+    }
+
+    /// Check if the ASR model is downloaded and ready
+    static var isModelReady: Bool {
+        let modelDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
+        let modelFile = modelDir.appendingPathComponent("model.int8.onnx")
+        let tokensFile = modelDir.appendingPathComponent("tokens.txt")
+        return FileManager.default.fileExists(atPath: modelFile.path)
+            && FileManager.default.fileExists(atPath: tokensFile.path)
+    }
+
+    /// Download model by running a tiny transcription (coli auto-downloads on first use)
+    func downloadModel(onProgress: @MainActor @Sendable @escaping (String) -> Void) async throws {
+        guard let coliPath = Self.findColiPath() else {
+            throw TypeNoError.coliNotInstalled
+        }
+
+        // Create a tiny silent WAV file to trigger coli's model download
+        let silentURL = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
+        if !FileManager.default.fileExists(atPath: silentURL.path) {
+            // Minimal WAV: 16kHz mono, 0.1s silence
+            var header = Data()
+            let dataSize: UInt32 = 3200  // 0.1s * 16000 * 2 bytes
+            let fileSize: UInt32 = 36 + dataSize
+            header.append(contentsOf: "RIFF".utf8)
+            header.append(contentsOf: withUnsafeBytes(of: fileSize.littleEndian) { Array($0) })
+            header.append(contentsOf: "WAVE".utf8)
+            header.append(contentsOf: "fmt ".utf8)
+            header.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })   // PCM
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })   // mono
+            header.append(contentsOf: withUnsafeBytes(of: UInt32(16000).littleEndian) { Array($0) }) // sample rate
+            header.append(contentsOf: withUnsafeBytes(of: UInt32(32000).littleEndian) { Array($0) }) // byte rate
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(2).littleEndian) { Array($0) })   // block align
+            header.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Array($0) })  // bits per sample
+            header.append(contentsOf: "data".utf8)
+            header.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
+            header.append(Data(count: Int(dataSize)))  // silence
+            try header.write(to: silentURL)
+        }
+
+        // Run coli asr on the silent file — this triggers model download
+        _ = try await transcribe(fileURL: silentURL, onProgress: onProgress)
     }
 
     static var isNpmAvailable: Bool {
@@ -1266,6 +1337,7 @@ final class StatusItemController: NSObject {
     private func updateTitle(for phase: AppPhase) {
         statusItem.button?.title = switch phase {
         case .idle: "⌃"
+        case .downloadingModel: "↓"
         case .recording: "Rec"
         case .transcribing: "..."
         case .done: "✓"
@@ -1478,6 +1550,12 @@ struct OverlayView: View {
                     raisedCircleButton("xmark") { appState.onCancel?() }
                     spectrumView
                     raisedCircleButton("checkmark", primary: true) { appState.onToggleRequest?() }
+                }
+            } else if case .downloadingModel(let message) = appState.phase {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(message).font(.system(size: 12)).foregroundStyle(.primary).lineLimit(1)
+                    raisedCircleButton("xmark") { appState.onCancel?() }
                 }
             } else if case .transcribing(let message) = appState.phase {
                 HStack(spacing: 8) {
