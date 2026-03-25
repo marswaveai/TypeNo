@@ -17,34 +17,81 @@ func L(_ en: String, _ zh: String) -> String {
 
 enum HotkeyModifier: String, Codable, CaseIterable {
     case control = "Control"
+    case leftControl = "LeftControl"
+    case rightControl = "RightControl"
     case option  = "Option"
+    case leftOption = "LeftOption"
+    case rightOption = "RightOption"
     case command = "Command"
+    case leftCommand = "LeftCommand"
+    case rightCommand = "RightCommand"
     case shift   = "Shift"
+    case leftShift = "LeftShift"
+    case rightShift = "RightShift"
 
     var symbol: String {
         switch self {
         case .control: "⌃"
+        case .leftControl: "⌃L"
+        case .rightControl: "⌃R"
         case .option:  "⌥"
+        case .leftOption: "⌥L"
+        case .rightOption: "⌥R"
         case .command: "⌘"
+        case .leftCommand: "⌘L"
+        case .rightCommand: "⌘R"
         case .shift:   "⇧"
+        case .leftShift: "⇧L"
+        case .rightShift: "⇧R"
         }
     }
 
     var label: String {
         switch self {
         case .control: L("⌃ Control", "⌃ Control")
+        case .leftControl: L("⌃ Left Control", "⌃ 左 Control")
+        case .rightControl: L("⌃ Right Control", "⌃ 右 Control")
         case .option:  L("⌥ Option",  "⌥ Option")
+        case .leftOption: L("⌥ Left Option", "⌥ 左 Option")
+        case .rightOption: L("⌥ Right Option", "⌥ 右 Option")
         case .command: L("⌘ Command", "⌘ Command")
+        case .leftCommand: L("⌘ Left Command", "⌘ 左 Command")
+        case .rightCommand: L("⌘ Right Command", "⌘ 右 Command")
         case .shift:   L("⇧ Shift",   "⇧ Shift")
+        case .leftShift: L("⇧ Left Shift", "⇧ 左 Shift")
+        case .rightShift: L("⇧ Right Shift", "⇧ 右 Shift")
         }
     }
 
-    var flag: NSEvent.ModifierFlags {
+    var baseFlag: NSEvent.ModifierFlags {
         switch self {
-        case .control: .control
-        case .option:  .option
-        case .command: .command
-        case .shift:   .shift
+        case .control, .leftControl, .rightControl: .control
+        case .option, .leftOption, .rightOption: .option
+        case .command, .leftCommand, .rightCommand: .command
+        case .shift, .leftShift, .rightShift: .shift
+        }
+    }
+
+    var keyCode: UInt16? {
+        switch self {
+        case .control, .option, .command, .shift:
+            return nil
+        case .leftControl:
+            return 59
+        case .rightControl:
+            return 62
+        case .leftOption:
+            return 58
+        case .rightOption:
+            return 61
+        case .leftCommand:
+            return 55
+        case .rightCommand:
+            return 54
+        case .leftShift:
+            return 56
+        case .rightShift:
+            return 60
         }
     }
 }
@@ -1141,6 +1188,8 @@ final class ColiASRService: @unchecked Sendable {
 
 @MainActor
 final class HotkeyMonitor {
+    private static let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 58, 59, 60, 61, 62, 63]
+
     private let modifier: HotkeyModifier
     private let triggerMode: TriggerMode
     private let onToggle: () -> Void
@@ -1186,10 +1235,17 @@ final class HotkeyMonitor {
     }
 
     private func handle(event: NSEvent) {
-        let keyPressed = event.modifierFlags.contains(modifier.flag)
-        // Build "other modifier" set: all standard modifiers except the selected one
+        if let watchedKeyCode = modifier.keyCode {
+            handleSpecificModifier(event: event, watchedKeyCode: watchedKeyCode)
+        } else {
+            handleGenericModifier(event: event)
+        }
+    }
+
+    private func handleGenericModifier(event: NSEvent) {
+        let keyPressed = event.modifierFlags.contains(modifier.baseFlag)
         var others: NSEvent.ModifierFlags = [.shift, .option, .command, .control, .function]
-        others.remove(modifier.flag)
+        others.remove(modifier.baseFlag)
         let hasOtherModifier = !event.modifierFlags.intersection(others).isEmpty
 
         if keyPressed && !hasOtherModifier {
@@ -1201,29 +1257,58 @@ final class HotkeyMonitor {
             if let downAt = keyDownAt {
                 let elapsed = Date().timeIntervalSince(downAt)
                 let isQuickRelease = elapsed < 0.3 && !otherKeyPressed && !hasOtherModifier
-
-                switch triggerMode {
-                case .singleTap:
-                    if isQuickRelease { onToggle() }
-
-                case .doubleTap:
-                    if isQuickRelease {
-                        if let firstTap = firstTapAt {
-                            if Date().timeIntervalSince(firstTap) < 0.5 {
-                                onToggle()
-                                firstTapAt = nil
-                            } else {
-                                // Too slow — treat this tap as the new first tap
-                                firstTapAt = Date()
-                            }
-                        } else {
-                            firstTapAt = Date()
-                        }
-                    }
-                }
+                handleRelease(isQuickRelease: isQuickRelease)
             }
             keyDownAt = nil
             otherKeyPressed = false
+        }
+    }
+
+    private func handleSpecificModifier(event: NSEvent, watchedKeyCode: UInt16) {
+        var otherFlags: NSEvent.ModifierFlags = [.shift, .option, .command, .control, .function]
+        otherFlags.remove(modifier.baseFlag)
+        let hasOtherModifier = !event.modifierFlags.intersection(otherFlags).isEmpty
+
+        if event.keyCode == watchedKeyCode {
+            if keyDownAt == nil {
+                let keyPressed = event.modifierFlags.contains(modifier.baseFlag)
+                if keyPressed && !hasOtherModifier {
+                    keyDownAt = Date()
+                    otherKeyPressed = false
+                }
+            } else if let downAt = keyDownAt {
+                let elapsed = Date().timeIntervalSince(downAt)
+                let isQuickRelease = elapsed < 0.3 && !otherKeyPressed && !hasOtherModifier
+                handleRelease(isQuickRelease: isQuickRelease)
+                keyDownAt = nil
+                otherKeyPressed = false
+            }
+            return
+        }
+
+        if keyDownAt != nil && Self.modifierKeyCodes.contains(event.keyCode) {
+            otherKeyPressed = true
+        }
+    }
+
+    private func handleRelease(isQuickRelease: Bool) {
+        guard isQuickRelease else { return }
+
+        switch triggerMode {
+        case .singleTap:
+            onToggle()
+
+        case .doubleTap:
+            if let firstTap = firstTapAt {
+                if Date().timeIntervalSince(firstTap) < 0.5 {
+                    onToggle()
+                    firstTapAt = nil
+                } else {
+                    firstTapAt = Date()
+                }
+            } else {
+                firstTapAt = Date()
+            }
         }
     }
 }
