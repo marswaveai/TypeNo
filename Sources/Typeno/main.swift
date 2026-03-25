@@ -805,14 +805,28 @@ final class ColiASRService: @unchecked Sendable {
         findColiPath() != nil
     }
 
-    /// Check if the ASR model is downloaded and ready
+    /// Check if the ASR model is downloaded, extracted, and intact
     static var isModelReady: Bool {
         let modelDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
         let modelFile = modelDir.appendingPathComponent("model.int8.onnx")
         let tokensFile = modelDir.appendingPathComponent("tokens.txt")
-        return FileManager.default.fileExists(atPath: modelFile.path)
-            && FileManager.default.fileExists(atPath: tokensFile.path)
+
+        guard FileManager.default.fileExists(atPath: modelFile.path),
+              FileManager.default.fileExists(atPath: tokensFile.path) else {
+            return false
+        }
+
+        // Verify model file is complete (full size ~88MB, reject if < 80MB)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: modelFile.path),
+              let size = attrs[.size] as? UInt64,
+              size > 80_000_000 else {
+            // Incomplete file — delete corrupt model directory so it re-downloads
+            try? FileManager.default.removeItem(atPath: modelDir.path)
+            return false
+        }
+
+        return true
     }
 
     /// Download model by running a tiny transcription (coli auto-downloads on first use)
