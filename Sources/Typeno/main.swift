@@ -1056,7 +1056,7 @@ final class ColiASRService: @unchecked Sendable {
                         guard !line.isEmpty else { return }
                         guard line.contains("MB") || line.contains("Downloading") || line.contains("Extracting") || line.contains("ready") else { return }
 
-                        guard lastProgressUpdate.elapsed() > 1.0 else { return }
+                        guard lastProgressUpdate.elapsed() > 1.5 else { return }
                         lastProgressUpdate.update()
 
                         // "42.5 MB / 155.5 MB (27.3%)" → "42.5MB / 27%"
