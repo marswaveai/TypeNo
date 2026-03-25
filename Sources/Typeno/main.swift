@@ -405,6 +405,25 @@ final class AppState: ObservableObject {
         return String(format: "%d:%02d", m, s)
     }
 
+    /// Re-download model and retry transcription of the given file. Returns transcribed text or nil.
+    private func recoverCorruptModelAndRetry(fileURL: URL) async -> String? {
+        ColiASRService.deleteModelDirectory()
+        phase = .transcribing(L("Checking model...", "检测模型中..."))
+        do {
+            _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
+                self?.phase = .transcribing(message)
+            }
+            guard !cancelled else { return nil }
+            phase = .transcribing()
+            let retryText = try await asrService.transcribe(fileURL: fileURL)
+            return retryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            guard !cancelled else { return nil }
+            showError(L("Model download failed", "模型下载失败"))
+            return nil
+        }
+    }
+
     /// Download model with progress shown in existing transcribing overlay
     func downloadModelThenRecord() async {
         cancelled = false
@@ -552,7 +571,9 @@ final class AppState: ObservableObject {
     }
 
     func transcribeAndInsert() async {
-        guard !cancelled, let url = currentRecordingURL else {
+        guard !cancelled else { return }
+        guard let url = currentRecordingURL else {
+            showError("No recording")
             return
         }
 
@@ -595,27 +616,13 @@ final class AppState: ObservableObject {
             guard !cancelled else { return }
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
-                // Preserve user's recording, re-download model, then retry
-                ColiASRService.deleteModelDirectory()
-                phase = .transcribing(L("Checking model...", "检测模型中..."))
-                do {
-                    _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
-                        self?.phase = .transcribing(message)
-                    }
-                    guard !cancelled else { return }
-                    phase = .transcribing()
-                    let retryText = try await asrService.transcribe(fileURL: url)
-                    transcript = retryText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !transcript.isEmpty {
-                        phase = .done(transcript)
-                        onOverlayRequest?(true)
-                        confirmInsert()
-                    } else {
-                        showError(L("No speech detected", "未检测到语音"))
-                    }
-                } catch {
-                    guard !cancelled else { return }
-                    showError(L("Model download failed", "模型下载失败"))
+                if let result = await recoverCorruptModelAndRetry(fileURL: url), !result.isEmpty {
+                    transcript = result
+                    phase = .done(transcript)
+                    onOverlayRequest?(true)
+                    confirmInsert()
+                } else if !cancelled {
+                    showError(L("No speech detected", "未检测到语音"))
                 }
             } else {
                 showError(msg)
@@ -714,29 +721,16 @@ final class AppState: ObservableObject {
             guard !cancelled else { return }
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
-                ColiASRService.deleteModelDirectory()
-                phase = .transcribing(L("Checking model...", "检测模型中..."))
-                do {
-                    _ = try await asrService.transcribe(fileURL: Self.ensureSilentWAV()) { [weak self] message in
-                        self?.phase = .transcribing(message)
-                    }
-                    guard !cancelled else { return }
-                    phase = .transcribing()
-                    let retryText = try await asrService.transcribe(fileURL: url)
-                    transcript = retryText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !transcript.isEmpty {
-                        phase = .done(transcript)
-                        onOverlayRequest?(true)
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(transcript, forType: .string)
-                        try? await Task.sleep(for: .seconds(2))
-                        cancel()
-                    } else {
-                        showError(L("No speech detected", "未检测到语音"))
-                    }
-                } catch {
-                    guard !cancelled else { return }
-                    showError(L("Model download failed", "模型下载失败"))
+                if let result = await recoverCorruptModelAndRetry(fileURL: url), !result.isEmpty {
+                    transcript = result
+                    phase = .done(transcript)
+                    onOverlayRequest?(true)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(transcript, forType: .string)
+                    try? await Task.sleep(for: .seconds(2))
+                    cancel()
+                } else if !cancelled {
+                    showError(L("No speech detected", "未检测到语音"))
                 }
             } else {
                 showError(msg)
@@ -1178,11 +1172,12 @@ final class ColiASRService: @unchecked Sendable {
                         throw TypeNoError.transcriptionFailed(msg.isEmpty ? "coli failed" : msg)
                     }
 
-                    // Extract actual transcription from stdout (skip \r progress lines)
-                    let realLines = output.components(separatedBy: "\n")
+                    // Extract transcription from stdout (skip \r progress overwrites)
+                    // Each \n line may contain \r-separated progress updates; take last \r segment
+                    let result = output.components(separatedBy: "\n")
                         .map { $0.components(separatedBy: "\r").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
                         .filter { !$0.isEmpty }
-                    let result = realLines.last ?? ""
+                        .joined(separator: "\n")
                     continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
