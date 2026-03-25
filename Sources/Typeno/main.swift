@@ -267,10 +267,13 @@ final class AppState: ObservableObject {
             if let pctRange = message.range(of: #"\([\d.]+%\)"#, options: .regularExpression),
                let pctVal = Double(message[pctRange].dropFirst().dropLast().replacingOccurrences(of: "%", with: "")) {
                 progress = pctVal / 100.0
-                let parts = message.components(separatedBy: "(")[0]
+                // "42.5 MB / 155.5 MB (27.3%)" → "42.5 / 155.5 MB"
+                let beforePct = message.components(separatedBy: "(")[0]
                     .trimmingCharacters(in: .whitespaces)
+                let cleaned = beforePct
                     .replacingOccurrences(of: " MB / ", with: " / ")
-                display = parts + " MB"
+                    .replacingOccurrences(of: " MB", with: "")
+                display = cleaned + " MB"
             } else if message.contains("Extracting") {
                 progress = 1.0
                 display = "Extracting"
