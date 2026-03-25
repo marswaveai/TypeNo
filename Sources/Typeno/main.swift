@@ -156,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func performUpdate() {
         Task {
-            appState.phase = .updating("Checking for updates...")
+            appState.phase = .updating("Checking for updates")
 
             guard let release = await updateService.checkForUpdate() else {
                 appState.phase = .idle
@@ -208,7 +208,7 @@ enum AppPhase: Equatable {
     case idle
     case downloadingModel(progress: Double, text: String)  // 0.0-1.0, "42.5 / 155.5 MB"
     case recording
-    case transcribing(String = "Transcribing...")
+    case transcribing(String = "Transcribing")
     case done(String)        // transcription result, waiting for user confirm
     case permissions(Set<PermissionKind>)
     case missingColi
@@ -220,7 +220,7 @@ enum AppPhase: Equatable {
         switch self {
         case .idle: "Press Fn to start"
         case .downloadingModel(_, let text): text
-        case .recording: "Listening..."
+        case .recording: "Listening"
         case .transcribing(let message): message
         case .done(let text): text
         case .permissions, .missingColi, .installingColi: ""
@@ -273,7 +273,7 @@ final class AppState: ObservableObject {
                 display = parts + " MB"
             } else if message.contains("Extracting") {
                 progress = 1.0
-                display = "Extracting..."
+                display = "Extracting"
             } else {
                 progress = 0
                 display = message
@@ -286,7 +286,7 @@ final class AppState: ObservableObject {
     }
 
     func downloadModelThenRecord() async {
-        phase = .downloadingModel(progress: 0, text: "Checking model...")
+        phase = .downloadingModel(progress: 0, text: "Checking model")
 
         do {
             try await asrService.downloadModel { [weak self] message in
@@ -347,7 +347,7 @@ final class AppState: ObservableObject {
     }
 
     func autoInstallColi() {
-        phase = .installingColi("Installing coli...")
+        phase = .installingColi("Installing coli")
 
 
         Task {
@@ -395,9 +395,9 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 100 {
-                    self?.phase = .transcribing("Almost timeout... (\(elapsed)s)")
+                    self?.phase = .transcribing("Timeout \(elapsed)s")
                 } else if elapsed >= 10 {
-                    self?.phase = .transcribing("Transcribing... \(elapsed)s")
+                    self?.phase = .transcribing("Transcribing \(elapsed)s")
                 }
             }
         }
@@ -479,9 +479,9 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 let elapsed = Int(Date().timeIntervalSince(startTime))
                 if elapsed >= 100 {
-                    self?.phase = .transcribing("Almost timeout... (\(elapsed)s)")
+                    self?.phase = .transcribing("Timeout \(elapsed)s")
                 } else if elapsed >= 10 {
-                    self?.phase = .transcribing("Transcribing... \(elapsed)s")
+                    self?.phase = .transcribing("Transcribing \(elapsed)s")
                 }
             }
         }
@@ -854,7 +854,7 @@ final class ColiASRService: @unchecked Sendable {
             throw TypeNoError.npmNotFound
         }
 
-        await onProgress("Installing coli...")
+        await onProgress("Installing coli")
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -999,7 +999,7 @@ final class ColiASRService: @unchecked Sendable {
                         } else if line.contains("Downloading") {
                             display = line
                         } else if line.contains("Extracting") {
-                            display = "Extracting model..."
+                            display = "Extracting model"
                         } else if line.contains("ready") {
                             display = "Model ready"
                         } else {
@@ -1382,7 +1382,7 @@ final class StatusItemController: NSObject {
         case .idle: "⌃"
         case .downloadingModel: "⇣"
         case .recording: "Rec"
-        case .transcribing: "..."
+        case .transcribing: "·"
         case .done: "✓"
         case .updating: "↓"
         case .permissions, .missingColi, .installingColi: "!"
@@ -1698,7 +1698,7 @@ struct OverlayView: View {
             }
 
             HStack {
-                Text("Checking automatically...")
+                Text("Checking automatically")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -1757,7 +1757,7 @@ struct OverlayView: View {
             }
 
             HStack {
-                Text("Checking automatically...")
+                Text("Checking automatically")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -1853,7 +1853,7 @@ final class UpdateService: @unchecked Sendable {
     }
 
     func downloadAndInstall(from downloadURL: URL, onProgress: @MainActor @Sendable (String) -> Void) async throws {
-        await onProgress("Downloading update...")
+        await onProgress("Downloading update")
 
         // Download zip to temp
         let (zipURL, _) = try await URLSession.shared.download(from: downloadURL)
@@ -1866,7 +1866,7 @@ final class UpdateService: @unchecked Sendable {
         }
         try FileManager.default.moveItem(at: zipURL, to: zipDest)
 
-        await onProgress("Installing update...")
+        await onProgress("Installing update")
 
         // Unzip
         let unzip = Process()
@@ -1921,7 +1921,7 @@ final class UpdateService: @unchecked Sendable {
         try? FileManager.default.removeItem(at: backupURL)
         try? FileManager.default.removeItem(at: tempDir)
 
-        await onProgress("Restarting...")
+        await onProgress("Restarting")
 
         // Relaunch
         let appPath = currentAppURL.path
