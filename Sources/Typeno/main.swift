@@ -386,9 +386,7 @@ final class AppState: ObservableObject {
                 throw TypeNoError.emptyTranscript
             }
 
-            // Show result briefly, then auto-insert
-            phase = .done(transcript)
-
+            // Skip showing result in overlay — go straight to paste
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
             progressTimer.invalidate()
@@ -472,8 +470,6 @@ final class AppState: ObservableObject {
                 throw TypeNoError.emptyTranscript
             }
 
-            phase = .done(transcript)
-    
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
             progressTimer.invalidate()
