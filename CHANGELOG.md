@@ -33,7 +33,13 @@
 - **✓ 按钮**：停止录音并识别（圆形立体按钮，带阴影）
 - 所有状态（录音/识别中/完成/错误）统一高度
 
-### 3. Overlay 定位逻辑重构
+### 3. 修复上游 Bug：ASR 超时时间不足
+
+- 原始代码 `ColiASRService` 中 install 和 transcribe 的超时均为 **120 秒**
+- 首次运行需要下载 SenseVoice 模型（~155MB），120 秒不够，导致识别超时失败
+- 修改为 **600 秒**，确保首次模型下载能完成
+
+### 4. Overlay 定位逻辑重构
 
 - 删除了原始代码中分散在 `AppState` 各处的 `onOverlayRequest` 手动调用（12+ 处）
 - 改为 `OverlayPanelController` 通过 Combine 订阅 `phase` 变化，统一控制 show/hide/layout

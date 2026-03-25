@@ -790,11 +790,11 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 120-second timeout for install
+                    // 600-second timeout for install
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning { process.terminate() }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
@@ -881,13 +881,13 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 120-second timeout (model download on first run can be slow)
+                    // 600-second timeout (model download on first run can be slow)
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning {
                             process.terminate()
                         }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
