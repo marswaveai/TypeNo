@@ -1286,6 +1286,10 @@ final class StatusItemController: NSObject {
         transcribeItem.target = self
         menu.addItem(transcribeItem)
 
+        let hotwordsItem = NSMenuItem(title: "Manage Hotwords...", action: #selector(openHotwords), keyEquivalent: "")
+        hotwordsItem.target = self
+        menu.addItem(hotwordsItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
@@ -1338,6 +1342,10 @@ final class StatusItemController: NSObject {
     func setUpdateAvailable(_ version: String) {
         guard let item = statusItem.menu?.item(withTag: 200) else { return }
         item.title = "Update Available (v\(version))"
+    }
+
+    @objc private func openHotwords() {
+        HotwordsWindowController.shared.show()
     }
 
     @objc private func transcribeFile() {
@@ -1850,6 +1858,96 @@ enum UpdateError: LocalizedError {
         case .appNotFound: "Update package is invalid"
         case .replaceFailed: "Failed to replace app"
         }
+    }
+}
+
+// MARK: - Hotwords Settings Window
+
+@MainActor
+final class HotwordsWindowController {
+    static let shared = HotwordsWindowController()
+    private var window: NSWindow?
+
+    func show() {
+        if let existing = window, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 420),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Hotwords Dictionary"
+        window.contentView = NSHostingView(rootView: HotwordsSettingsView())
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.window = window
+    }
+}
+
+struct HotwordsSettingsView: View {
+    @ObservedObject var manager = HotwordsManager.shared
+    @State private var newWord = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                TextField("Add hotword...", text: $newWord)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { addWord() }
+                Button(action: addWord) {
+                    Image(systemName: "plus")
+                }
+                .disabled(newWord.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding()
+
+            Divider()
+
+            if manager.hotwords.isEmpty {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "text.book.closed")
+                        .font(.system(size: 36))
+                        .foregroundColor(.secondary)
+                    Text("No hotwords yet")
+                        .font(.headline)
+                    Text("Add words that should be preserved exactly as spelled during transcription.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 240)
+                }
+                Spacer()
+            } else {
+                List {
+                    ForEach(Array(manager.hotwords.enumerated()), id: \.offset) { index, word in
+                        HStack {
+                            Text(word)
+                            Spacer()
+                            Button(action: { manager.remove(at: IndexSet(integer: index)) }) {
+                                Image(systemName: "trash")
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func addWord() {
+        let trimmed = newWord.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        manager.add(trimmed)
+        newWord = ""
     }
 }
 
