@@ -1572,9 +1572,21 @@ struct OverlayView: View {
 
     var spectrumView: some View {
         let raw = appState.recorder.spectrumData
-        // Mirror: reversed + original → symmetric, center tallest
-        let half = Array(raw.prefix(10))
-        let bars = half.reversed() + half
+        // Center-out: low freq (most energy) in center, high freq at edges
+        // Interleave odd bins left, even bins right
+        // Result: [b19, b17, b15, ..., b3, b1, b0, b2, b4, ..., b16, b18]
+        let count = raw.count
+        var bars = [Float](repeating: 0, count: count)
+        let mid = count / 2
+        for i in 0..<count {
+            if i % 2 == 0 {
+                // Even bins → right side (from center outward)
+                bars[mid + i / 2] = raw[i]
+            } else {
+                // Odd bins → left side (from center outward)
+                bars[mid - 1 - i / 2] = raw[i]
+            }
+        }
 
         return HStack(spacing: 2) {
             ForEach(0..<bars.count, id: \.self) { index in
