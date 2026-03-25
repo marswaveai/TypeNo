@@ -999,7 +999,7 @@ final class ColiASRService: @unchecked Sendable {
                                 guard elapsed > 0.5 else { return }
                                 lastReportedPct.update()
                             }
-                            display = line
+                            display = line.replacingOccurrences(of: "...", with: "")
                         } else if line.contains("Downloading") {
                             display = line.replacingOccurrences(of: "...", with: "")
                         } else if line.contains("Extracting") {
