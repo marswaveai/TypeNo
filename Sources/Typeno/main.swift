@@ -1398,50 +1398,84 @@ struct OverlayView: View {
     }
 
     var compactView: some View {
-        HStack(spacing: 10) {
+        Group {
             if case .recording = appState.phase {
-                Circle()
-                    .fill(Color.primary.opacity(0.3))
-                    .frame(width: 6, height: 6)
-            }
-
-            if case .transcribing = appState.phase {
-                ProgressView()
-                    .controlSize(.small)
-            }
-
-            if case .updating = appState.phase {
-                ProgressView()
-                    .controlSize(.small)
-            }
-
-            if case .done(let text) = appState.phase {
-                Image(systemName: "doc.on.clipboard")
-                    .font(.system(size: 11))
+                HStack(spacing: 12) {
+                    Button(action: { appState.onCancel?() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
 
-                Text(text)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-            } else {
-                Text(appState.phase.subtitle)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-            }
+                    spectrumView
 
-            if case .error = appState.phase {
-                Button("OK") {
-                    appState.onCancel?()
+                    Button(action: { appState.onToggleRequest?() }) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.primary)
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 12))
+            } else if case .transcribing(let message) = appState.phase {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(message)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                }
+            } else if case .done(let text) = appState.phase {
+                HStack(spacing: 10) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(text)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                }
+            } else if case .error(let message) = appState.phase {
+                HStack(spacing: 10) {
+                    Text(message)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                    Button("OK") {
+                        appState.onCancel?()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12))
+                }
+            } else if case .updating(let message) = appState.phase {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(message)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                }
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+    }
+
+    var spectrumView: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<appState.recorder.spectrumData.count, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.primary.opacity(0.6))
+                    .frame(width: 3, height: max(4, CGFloat(appState.recorder.spectrumData[index]) * 30))
+            }
+        }
+        .frame(height: 30)
+        .animation(.easeOut(duration: 0.08), value: appState.recorder.spectrumData)
     }
 
     func permissionView(missing: Set<PermissionKind>) -> some View {
