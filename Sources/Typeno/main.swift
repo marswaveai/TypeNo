@@ -1417,6 +1417,8 @@ final class OverlayPanelController {
     private let hostingView: NSHostingView<OverlayView>
     private let appState: AppState
 
+    private var phaseCancellable: AnyCancellable?
+
     init(appState: AppState) {
         self.appState = appState
         let overlayView = OverlayView(appState: appState)
@@ -1437,12 +1439,25 @@ final class OverlayPanelController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.contentView = hostingView
+
+        // Re-layout and re-center when phase changes
+        phaseCancellable = appState.$phase.sink { [weak self] _ in
+            guard let self, self.panel.isVisible else { return }
+            DispatchQueue.main.async {
+                self.updateLayout()
+            }
+        }
     }
 
     func show() {
+        updateLayout()
+        panel.orderFrontRegardless()
+    }
+
+    private func updateLayout() {
         hostingView.invalidateIntrinsicContentSize()
         let idealSize = hostingView.fittingSize
-        let width = max(idealSize.width, 240)
+        let width = max(idealSize.width, 200)
         let height = max(idealSize.height, 44)
 
         if let screen = NSScreen.main {
@@ -1451,7 +1466,6 @@ final class OverlayPanelController {
             let y: CGFloat
 
             if case .permissions = appState.phase {
-                // Onboarding: top-right corner, below menu bar
                 x = frame.maxX - width - 16
                 y = frame.maxY - height - 16
             } else if case .missingColi = appState.phase {
@@ -1461,7 +1475,7 @@ final class OverlayPanelController {
                 x = frame.maxX - width - 16
                 y = frame.maxY - height - 16
             } else {
-                // Recording/transcription bar: center bottom
+                // All other states: center bottom
                 x = frame.midX - width / 2
                 y = frame.minY + 48
             }
@@ -1470,7 +1484,6 @@ final class OverlayPanelController {
         } else {
             panel.setContentSize(NSSize(width: width, height: height))
         }
-        panel.orderFrontRegardless()
     }
 
     func hide() {
@@ -1504,11 +1517,11 @@ struct OverlayView: View {
     var compactView: some View {
         Group {
             if case .recording = appState.phase {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     Button(action: { appState.onCancel?() }) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 28, height: 28)
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(width: 22, height: 22)
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -1518,8 +1531,8 @@ struct OverlayView: View {
 
                     Button(action: { appState.onToggleRequest?() }) {
                         Image(systemName: "checkmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 28, height: 28)
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(width: 22, height: 22)
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -1588,14 +1601,14 @@ struct OverlayView: View {
             }
         }
 
-        return HStack(spacing: 2) {
+        return HStack(spacing: 1.5) {
             ForEach(0..<bars.count, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1.5)
+                RoundedRectangle(cornerRadius: 1)
                     .fill(Color.primary.opacity(0.6))
-                    .frame(width: 3, height: max(3, CGFloat(bars[index]) * 28))
+                    .frame(width: 2.5, height: max(2, CGFloat(bars[index]) * 20))
             }
         }
-        .frame(height: 30)
+        .frame(height: 22)
         .animation(.easeOut(duration: 0.08), value: raw)
     }
 
