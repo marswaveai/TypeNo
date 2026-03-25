@@ -1007,7 +1007,9 @@ final class ColiASRService: @unchecked Sendable {
                             return
                         }
                         Task { @MainActor in
-                            onProgress(display)
+                            let cleaned = display.replacingOccurrences(of: "...", with: "")
+                                .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+                            onProgress(cleaned)
                         }
                     }
 
