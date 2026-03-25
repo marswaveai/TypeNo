@@ -1459,9 +1459,10 @@ final class OverlayPanelController {
 
     private func updateLayout() {
         hostingView.invalidateIntrinsicContentSize()
+        hostingView.layoutSubtreeIfNeeded()
         let idealSize = hostingView.fittingSize
-        let width = max(idealSize.width, 200)
-        let height = max(idealSize.height, 44)
+        let width = idealSize.width
+        let height = idealSize.height
 
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
