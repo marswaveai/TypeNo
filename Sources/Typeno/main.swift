@@ -23,13 +23,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         overlayController = OverlayPanelController(appState: appState)
         statusItemController = StatusItemController(appState: appState)
-        hotkeyMonitor = HotkeyMonitor(onToggle: { [weak self] in
-            self?.handleToggle()
-        })
+
+        // 初始化 HotkeyMonitor，使用 UserDefaults 中保存的配置
+        let modifier = UserDefaults.standard.hotkeyModifier()
+        let triggerMode = UserDefaults.standard.triggerMode()
+        hotkeyMonitor = HotkeyMonitor(
+            onToggle: { [weak self] in
+                self?.handleToggle()
+            },
+            modifier: modifier,
+            triggerMode: triggerMode
+        )
 
         appState.onToggleRequest = { [weak self] in
             self?.handleToggle()
         }
+
+        // 监听快捷键配置变化
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(restartHotkeyMonitor),
+            name: .hotkeyConfigurationChanged,
+            object: nil
+        )
+
+        // 监听触发模式配置变化
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(restartHotkeyMonitor),
+            name: .triggerModeConfigurationChanged,
+            object: nil
+        )
 
         appState.onOverlayRequest = { [weak self] visible in
             if visible {
@@ -113,6 +137,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func restartHotkeyMonitor() {
+        hotkeyMonitor = nil
+        let modifier = UserDefaults.standard.hotkeyModifier()
+        let triggerMode = UserDefaults.standard.triggerMode()
+        hotkeyMonitor = HotkeyMonitor(
+            onToggle: { [weak self] in
+                self?.handleToggle()
+            },
+            modifier: modifier,
+            triggerMode: triggerMode
+        )
+        hotkeyMonitor?.start()
+    }
+
     private func startRecording() {
         // Only check permissions if not previously granted this session
         if !permissionsGranted {
@@ -182,6 +220,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // MARK: - Model
+
+enum HotkeyModifier: String, Codable, CaseIterable {
+    case control = "Control"
+    case option = "Option"
+    case command = "Command"
+    case shift = "Shift"
+
+    var displaySymbol: String {
+        switch self {
+        case .control: return "⌃"
+        case .option: return "⌥"
+        case .command: return "⌘"
+        case .shift: return "⇧"
+        }
+    }
+
+    var nsEventFlag: NSEvent.ModifierFlags {
+        switch self {
+        case .control: return .control
+        case .option: return .option
+        case .command: return .command
+        case .shift: return .shift
+        }
+    }
+}
+
+enum TriggerMode: String, Codable, CaseIterable {
+    case singleTap = "Single Tap"
+    case doubleTap = "Double Tap"
+
+    var displayName: String {
+        return rawValue
+    }
+
+    var displaySymbol: String {
+        switch self {
+        case .singleTap: return "1×"
+        case .doubleTap: return "2×"
+        }
+    }
+}
 
 enum PermissionKind: CaseIterable, Hashable {
     case microphone
@@ -986,24 +1065,29 @@ final class ColiASRService: @unchecked Sendable {
     }
 }
 
-// MARK: - Hotkey Monitor (short-press Control only)
+// MARK: - Hotkey Monitor
 
 @MainActor
 final class HotkeyMonitor {
     private let onToggle: () -> Void
+    private let modifier: HotkeyModifier
+    private let triggerMode: TriggerMode
     private var flagsMonitor: Any?
     private var keyMonitor: Any?
     private var localFlagsMonitor: Any?
     private var localKeyMonitor: Any?
-    private var controlDownAt: Date?
+    private var keyDownAt: Date?
+    private var firstTapAt: Date?  // For double-tap detection
     private var otherKeyPressed = false
 
-    init(onToggle: @escaping () -> Void) {
+    init(onToggle: @escaping () -> Void, modifier: HotkeyModifier = .control, triggerMode: TriggerMode = .singleTap) {
         self.onToggle = onToggle
+        self.modifier = modifier
+        self.triggerMode = triggerMode
     }
 
     func start() {
-        // Track key presses while Control is held (both global and local)
+        // Track key presses while modifier is held (both global and local)
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] _ in
             self?.otherKeyPressed = true
         }
@@ -1026,26 +1110,46 @@ final class HotkeyMonitor {
     }
 
     private func handle(event: NSEvent) {
-        let controlPressed = event.modifierFlags.contains(.control)
+        let keyPressed = event.modifierFlags.contains(modifier.nsEventFlag)
         // If any other modifier is also held, it's a combo — ignore
-        let otherModifiers: NSEvent.ModifierFlags = [.shift, .option, .command, .function]
+        let otherModifiers = NSEvent.ModifierFlags.allModifiers.subtracting(modifier.nsEventFlag)
         let hasOtherModifier = !event.modifierFlags.intersection(otherModifiers).isEmpty
 
-        if controlPressed && !hasOtherModifier {
-            // Pure Control just went down
-            if controlDownAt == nil {
-                controlDownAt = Date()
+        if keyPressed && !hasOtherModifier {
+            // Pure modifier key just went down
+            if keyDownAt == nil {
+                keyDownAt = Date()
                 otherKeyPressed = false
             }
         } else {
-            // Control released or another modifier involved
-            if let downAt = controlDownAt {
+            // Modifier key released or another modifier involved
+            if let downAt = keyDownAt {
                 let elapsed = Date().timeIntervalSince(downAt)
-                if elapsed < 0.3 && !otherKeyPressed && !hasOtherModifier {
-                    onToggle()
+                let isQuickRelease = elapsed < 0.3 && !otherKeyPressed && !hasOtherModifier
+
+                switch triggerMode {
+                case .singleTap:
+                    if isQuickRelease {
+                        onToggle()
+                    }
+
+                case .doubleTap:
+                    if isQuickRelease {
+                        if let firstTap = firstTapAt {
+                            let timeSinceFirstTap = Date().timeIntervalSince(firstTap)
+                            if timeSinceFirstTap < 0.5 {  // 500ms for double-tap
+                                onToggle()
+                                firstTapAt = nil
+                            } else {
+                                firstTapAt = Date()
+                            }
+                        } else {
+                            firstTapAt = Date()
+                        }
+                    }
                 }
             }
-            controlDownAt = nil
+            keyDownAt = nil
             otherKeyPressed = false
         }
     }
@@ -1080,16 +1184,62 @@ final class StatusItemController: NSObject {
     private func configureMenu() {
         let menu = NSMenu()
 
-        let recordItem = NSMenuItem(title: "Record  ⌃", action: #selector(toggleRecording), keyEquivalent: "")
+        // Record 菜单项（动态显示当前快捷键）
+        let currentModifier = UserDefaults.standard.hotkeyModifier()
+        let recordItem = NSMenuItem(
+            title: "Record  \(currentModifier.displaySymbol)",
+            action: #selector(toggleRecording),
+            keyEquivalent: ""
+        )
         recordItem.target = self
         recordItem.tag = 100
         menu.addItem(recordItem)
 
+        // Transcribe File... 菜单项
         let transcribeItem = NSMenuItem(title: "Transcribe File...", action: #selector(transcribeFile), keyEquivalent: "")
         transcribeItem.target = self
         menu.addItem(transcribeItem)
 
         menu.addItem(NSMenuItem.separator())
+
+        // Hotkey 子菜单
+        let hotkeySubMenu = NSMenu()
+        let hotkeyItem = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
+
+        for (index, modifier) in HotkeyModifier.allCases.enumerated() {
+            let item = NSMenuItem(
+                title: "\(modifier.displaySymbol) \(modifier.rawValue)",
+                action: #selector(changeHotkey(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = 300 + index
+            item.state = (modifier == currentModifier) ? .on : .off
+            hotkeySubMenu.addItem(item)
+        }
+
+        menu.setSubmenu(hotkeySubMenu, for: hotkeyItem)
+        menu.addItem(hotkeyItem)
+
+        // Trigger Mode 子菜单
+        let currentTriggerMode = UserDefaults.standard.triggerMode()
+        let triggerModeSubMenu = NSMenu()
+        let triggerModeItem = NSMenuItem(title: "Trigger Mode", action: nil, keyEquivalent: "")
+
+        for (index, mode) in TriggerMode.allCases.enumerated() {
+            let item = NSMenuItem(
+                title: "\(mode.displaySymbol) \(mode.displayName)",
+                action: #selector(changeTriggerMode(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = 400 + index
+            item.state = (mode == currentTriggerMode) ? .on : .off
+            triggerModeSubMenu.addItem(item)
+        }
+
+        menu.setSubmenu(triggerModeSubMenu, for: triggerModeItem)
+        menu.addItem(triggerModeItem)
 
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         updateItem.target = self
@@ -1104,19 +1254,10 @@ final class StatusItemController: NSObject {
         statusItem.menu = menu
     }
 
-    private func updateRecordMenuItem(for phase: AppPhase) {
-        guard let item = statusItem.menu?.item(withTag: 100) else { return }
-        switch phase {
-        case .recording:
-            item.title = "Stop Recording"
-        default:
-            item.title = "Record"
-        }
-    }
-
     private func updateTitle(for phase: AppPhase) {
+        let modifier = UserDefaults.standard.hotkeyModifier()
         statusItem.button?.title = switch phase {
-        case .idle: "⌃"
+        case .idle: modifier.displaySymbol
         case .recording: "Rec"
         case .transcribing: "..."
         case .done: "✓"
@@ -1126,8 +1267,85 @@ final class StatusItemController: NSObject {
         }
     }
 
+    private func updateRecordMenuItem(for phase: AppPhase) {
+        guard let item = statusItem.menu?.item(withTag: 100) else { return }
+        let modifier = UserDefaults.standard.hotkeyModifier()
+        switch phase {
+        case .recording:
+            item.title = "Stop Recording"
+        default:
+            item.title = "Record  \(modifier.displaySymbol)"
+        }
+    }
+
     @objc private func openPrivacySettings() {
         PermissionManager.openPrivacySettings(for: [])
+    }
+
+    @objc private func changeHotkey(_ sender: NSMenuItem) {
+        guard let index = HotkeyModifier.allCases.indices.first(where: { sender.tag == 300 + $0 }),
+              let modifier = HotkeyModifier.allCases[safe: index] else { return }
+
+        // 更新 UserDefaults
+        UserDefaults.standard.setHotkeyModifier(modifier)
+
+        // 更新菜单状态
+        updateHotkeyMenuStates(modifier)
+
+        // 更新 Record 菜单项标题
+        if let phase = appState?.phase {
+            updateRecordMenuItem(for: phase)
+        }
+
+        // 更新状态栏图标
+        if let phase = appState?.phase {
+            updateTitle(for: phase)
+        }
+
+        // 通知 AppDelegate 重启 HotkeyMonitor
+        NotificationCenter.default.post(name: .hotkeyConfigurationChanged, object: nil)
+    }
+
+    @objc private func changeTriggerMode(_ sender: NSMenuItem) {
+        guard let index = TriggerMode.allCases.indices.first(where: { sender.tag == 400 + $0 }),
+              let mode = TriggerMode.allCases[safe: index] else { return }
+
+        // 更新 UserDefaults
+        UserDefaults.standard.setTriggerMode(mode)
+
+        // 更新菜单状态
+        updateTriggerModeMenuStates(mode)
+
+        // 通知 AppDelegate 重启 HotkeyMonitor
+        NotificationCenter.default.post(name: .triggerModeConfigurationChanged, object: nil)
+    }
+
+    private func updateTriggerModeMenuStates(_ selectedMode: TriggerMode) {
+        guard let menu = statusItem.menu else { return }
+        for item in menu.items {
+            if let submenu = item.submenu {
+                for subItem in submenu.items {
+                    if let index = TriggerMode.allCases.indices.first(where: { subItem.tag == 400 + $0 }),
+                       let mode = TriggerMode.allCases[safe: index] {
+                        subItem.state = (mode == selectedMode) ? .on : .off
+                    }
+                }
+            }
+        }
+    }
+
+    private func updateHotkeyMenuStates(_ selectedModifier: HotkeyModifier) {
+        guard let menu = statusItem.menu else { return }
+        for item in menu.items {
+            if let submenu = item.submenu {
+                for subItem in submenu.items {
+                    if let index = HotkeyModifier.allCases.indices.first(where: { subItem.tag == 300 + $0 }),
+                       let modifier = HotkeyModifier.allCases[safe: index] {
+                        subItem.state = (modifier == selectedModifier) ? .on : .off
+                    }
+                }
+            }
+        }
     }
 
     @objc private func toggleRecording() {
@@ -1620,6 +1838,52 @@ enum UpdateError: LocalizedError {
         case .replaceFailed: "Failed to replace app"
         }
     }
+}
+
+// MARK: - Extensions
+
+extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+extension UserDefaults {
+    private static let hotkeyModifierKey = "ai.marswave.typeno.hotkeyModifier"
+    private static let triggerModeKey = "ai.marswave.typeno.triggerMode"
+
+    func hotkeyModifier() -> HotkeyModifier {
+        guard let rawValue = string(forKey: Self.hotkeyModifierKey),
+              let modifier = HotkeyModifier(rawValue: rawValue) else {
+            return .control  // 默认 Control 键
+        }
+        return modifier
+    }
+
+    func setHotkeyModifier(_ modifier: HotkeyModifier) {
+        set(modifier.rawValue, forKey: Self.hotkeyModifierKey)
+    }
+
+    func triggerMode() -> TriggerMode {
+        guard let rawValue = string(forKey: Self.triggerModeKey),
+              let mode = TriggerMode(rawValue: rawValue) else {
+            return .singleTap  // 默认单击
+        }
+        return mode
+    }
+
+    func setTriggerMode(_ mode: TriggerMode) {
+        set(mode.rawValue, forKey: Self.triggerModeKey)
+    }
+}
+
+extension Notification.Name {
+    static let hotkeyConfigurationChanged = Notification.Name("ai.marswave.typeno.hotkeyConfigurationChanged")
+    static let triggerModeConfigurationChanged = Notification.Name("ai.marswave.typeno.triggerModeConfigurationChanged")
+}
+
+extension NSEvent.ModifierFlags {
+    static let allModifiers: NSEvent.ModifierFlags = [.control, .option, .command, .shift, .function]
 }
 
 // MARK: - Entry Point
