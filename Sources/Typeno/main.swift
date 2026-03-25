@@ -1566,12 +1566,23 @@ struct OverlayView: View {
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
     }
 
+    /// Mirror the spectrum: take meaningful bins, arrange as symmetric waveform
+    /// Center bars are tallest, mirrored outward — like Typeless style
+    private var mirroredSpectrum: [Float] {
+        let raw = appState.recorder.spectrumData
+        // Use first 10 bins (where voice energy lives), ignore empty high-freq bins
+        let half = Array(raw.prefix(10))
+        // Build symmetric: reversed + original → center is loudest
+        return half.reversed() + half
+    }
+
     var spectrumView: some View {
-        HStack(spacing: 2) {
-            ForEach(0..<appState.recorder.spectrumData.count, id: \.self) { index in
+        let bars = mirroredSpectrum
+        return HStack(spacing: 2) {
+            ForEach(0..<bars.count, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Color.primary.opacity(0.6))
-                    .frame(width: 3, height: max(4, CGFloat(appState.recorder.spectrumData[index]) * 30))
+                    .frame(width: 3, height: max(3, CGFloat(bars[index]) * 28))
             }
         }
         .frame(height: 30)
