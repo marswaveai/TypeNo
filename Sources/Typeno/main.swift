@@ -138,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func restartHotkeyMonitor() {
+        hotkeyMonitor?.stop()
         hotkeyMonitor = nil
         let modifier = UserDefaults.standard.hotkeyModifier()
         let triggerMode = UserDefaults.standard.triggerMode()
@@ -1086,6 +1087,25 @@ final class HotkeyMonitor {
         self.triggerMode = triggerMode
     }
 
+    func stop() {
+        if let monitor = flagsMonitor {
+            NSEvent.removeMonitor(monitor)
+            flagsMonitor = nil
+        }
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+        if let monitor = localFlagsMonitor {
+            NSEvent.removeMonitor(monitor)
+            localFlagsMonitor = nil
+        }
+        if let monitor = localKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            localKeyMonitor = nil
+        }
+    }
+
     func start() {
         // Track key presses while modifier is held (both global and local)
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] _ in
@@ -1139,10 +1159,9 @@ final class HotkeyMonitor {
                             let timeSinceFirstTap = Date().timeIntervalSince(firstTap)
                             if timeSinceFirstTap < 0.5 {  // 500ms for double-tap
                                 onToggle()
-                                firstTapAt = nil
-                            } else {
-                                firstTapAt = Date()
                             }
+                            // Always reset firstTapAt after second tap, regardless of timing
+                            firstTapAt = nil
                         } else {
                             firstTapAt = Date()
                         }
