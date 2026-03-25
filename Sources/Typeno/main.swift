@@ -517,8 +517,17 @@ final class AppState: ObservableObject {
             progressTimer.invalidate()
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
+                // Model corrupt — re-download then retry this file
                 ColiASRService.deleteModelDirectory()
-                await downloadModelThenRecord()
+                phase = .downloadingModel(progress: 0, text: "Checking model")
+                do {
+                    try await asrService.downloadModel { [weak self] message in
+                        self?.handleProgressMessage(message)
+                    }
+                    await transcribeFile(url)
+                } catch {
+                    showError("Model download failed")
+                }
             } else {
                 showError(msg)
             }
@@ -612,6 +621,7 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     private var outputFile: AVAudioFile?
     private let fftSize: Int = 1024
     private var fftSetup: FFTSetup?
+    private let fftLock = NSLock()
 
     func start() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
@@ -689,18 +699,16 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     }
 
     func stop() -> URL? {
-        // Stop engine first to ensure audio IO thread finishes,
-        // then remove tap so no more callbacks fire
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil
-        // Small delay to let any in-flight tap callback finish
-        Thread.sleep(forTimeInterval: 0.05)
         outputFile = nil
+        fftLock.lock()
         if let setup = fftSetup {
             vDSP_destroy_fftsetup(setup)
             fftSetup = nil
         }
+        fftLock.unlock()
         let url = recordingURL
         recordingURL = nil
         spectrumData = Array(repeating: 0, count: 20)
@@ -742,10 +750,13 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
                 }
 
                 let log2n = vDSP_Length(log2(Double(fftSize)))
+                self.fftLock.lock()
                 if self.fftSetup == nil {
                     self.fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
                 }
-                if let setup = self.fftSetup {
+                let setup = self.fftSetup
+                self.fftLock.unlock()
+                if let setup {
                     vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
                 }
 
@@ -1516,17 +1527,15 @@ final class OverlayPanelController {
         panel.contentView = hostingView
 
         // Single source of truth: phase drives show/hide/layout
+        // One async hop to let SwiftUI render before measuring
         phaseCancellable = appState.$phase.sink { [weak self] phase in
-            guard let self else { return }
             DispatchQueue.main.async {
-                switch phase {
-                case .idle:
+                guard let self else { return }
+                if case .idle = phase {
                     self.hide()
-                default:
-                    DispatchQueue.main.async {
-                        self.updateLayout()
-                        self.panel.orderFrontRegardless()
-                    }
+                } else {
+                    self.updateLayout()
+                    self.panel.orderFrontRegardless()
                 }
             }
         }
