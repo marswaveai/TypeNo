@@ -555,7 +555,7 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        // Target format: 16 kHz mono PCM for ASR
+        // Target format: 16 kHz mono for processing (float32 for AVAudioConverter)
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16_000,
@@ -565,8 +565,17 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
             throw TypeNoError.noRecording
         }
 
-        // Create output file in 16 kHz mono WAV format
-        let file = try AVAudioFile(forWriting: url, settings: targetFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        // Write WAV as 16-bit signed integer (s16le) — what sherpa-onnx expects
+        // AVAudioFile converts from float32 processing format to int16 on disk
+        let fileSettings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: fileSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
         self.outputFile = file
 
         // Create converter from input format to 16 kHz mono
