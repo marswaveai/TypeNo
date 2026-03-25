@@ -16,35 +16,56 @@ func L(_ en: String, _ zh: String) -> String {
 // MARK: - Hotkey Configuration
 
 enum HotkeyModifier: String, Codable, CaseIterable {
-    case control = "Control"
-    case option  = "Option"
-    case command = "Command"
-    case shift   = "Shift"
+    case leftControl  = "LeftControl"
+    case rightControl = "RightControl"
+    case leftOption   = "LeftOption"
+    case rightOption  = "RightOption"
+    case leftCommand  = "LeftCommand"
+    case rightCommand = "RightCommand"
+    case leftShift    = "LeftShift"
+    case rightShift   = "RightShift"
 
     var symbol: String {
         switch self {
-        case .control: "⌃"
-        case .option:  "⌥"
-        case .command: "⌘"
-        case .shift:   "⇧"
+        case .leftControl,  .rightControl: "⌃"
+        case .leftOption,   .rightOption:  "⌥"
+        case .leftCommand,  .rightCommand: "⌘"
+        case .leftShift,    .rightShift:   "⇧"
         }
     }
 
     var label: String {
         switch self {
-        case .control: L("⌃ Control", "⌃ Control")
-        case .option:  L("⌥ Option",  "⌥ Option")
-        case .command: L("⌘ Command", "⌘ Command")
-        case .shift:   L("⇧ Shift",   "⇧ Shift")
+        case .leftControl:  L("⌃ Left Control",  "⌃ 左 Control")
+        case .rightControl: L("⌃ Right Control", "⌃ 右 Control")
+        case .leftOption:   L("⌥ Left Option",   "⌥ 左 Option")
+        case .rightOption:  L("⌥ Right Option",  "⌥ 右 Option")
+        case .leftCommand:  L("⌘ Left Command",  "⌘ 左 Command")
+        case .rightCommand: L("⌘ Right Command", "⌘ 右 Command")
+        case .leftShift:    L("⇧ Left Shift",    "⇧ 左 Shift")
+        case .rightShift:   L("⇧ Right Shift",   "⇧ 右 Shift")
         }
     }
 
     var flag: NSEvent.ModifierFlags {
         switch self {
-        case .control: .control
-        case .option:  .option
-        case .command: .command
-        case .shift:   .shift
+        case .leftControl,  .rightControl: .control
+        case .leftOption,   .rightOption:  .option
+        case .leftCommand,  .rightCommand: .command
+        case .leftShift,    .rightShift:   .shift
+        }
+    }
+
+    var keyCode: UInt16 {
+        switch self {
+        case .leftControl:  59
+        case .rightControl: 62
+        case .leftOption:   58
+        case .rightOption:  61
+        case .leftCommand:  55
+        case .rightCommand: 54
+        case .leftShift:    56
+        case .rightShift:   60
         }
     }
 }
@@ -68,7 +89,7 @@ extension UserDefaults {
     var hotkeyModifier: HotkeyModifier {
         get {
             guard let raw = string(forKey: Self.modifierKey),
-                  let v = HotkeyModifier(rawValue: raw) else { return .control }
+                  let v = HotkeyModifier(rawValue: raw) else { return .leftControl }
             return v
         }
         set { set(newValue.rawValue, forKey: Self.modifierKey) }
@@ -290,13 +311,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 appState.showError(L("Could not check for updates", "无法检查更新"))
 
             case .updateAvailable(let release):
-                do {
-                    try await updateService.downloadAndInstall(from: release.downloadURL) { message in
-                        self.appState.phase = .updating(message)
-                    }
-                } catch {
-                    appState.showError(L("Update failed", "更新失败") + ": \(error.localizedDescription)")
-                }
+                appState.phase = .updating(L("v\(release.version) available", "v\(release.version) 可更新"))
+                appState.onOverlayRequest?(true)
+                try? await Task.sleep(for: .seconds(1.5))
+                appState.phase = .idle
+                appState.onOverlayRequest?(false)
+                NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdateService.repoOwner)/\(UpdateService.repoName)/releases/latest")!)
             }
         }
     }
@@ -572,7 +592,6 @@ final class AppState: ObservableObject {
             guard !cancelled else { return }
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
-                // Model corrupt — clean up recording, delete model, re-download
                 if let currentRecordingURL {
                     try? FileManager.default.removeItem(at: currentRecordingURL)
                 }
@@ -677,7 +696,6 @@ final class AppState: ObservableObject {
             let msg = error.localizedDescription
             if msg.contains("protobuf") || msg.contains("Failed to load model") {
                 ColiASRService.deleteModelDirectory()
-                // Retry once after re-download
                 phase = .transcribing(L("Checking model...", "检测模型中..."))
                 do {
                     let silentURL = FileManager.default.temporaryDirectory.appendingPathComponent("coli-init.wav")
@@ -1357,7 +1375,7 @@ final class HotkeyMonitor {
     private var firstTapAt: Date?
     private var otherKeyPressed = false
 
-    init(modifier: HotkeyModifier = .control, triggerMode: TriggerMode = .singleTap, onToggle: @escaping () -> Void) {
+    init(modifier: HotkeyModifier = .leftControl, triggerMode: TriggerMode = .singleTap, onToggle: @escaping () -> Void) {
         self.modifier = modifier
         self.triggerMode = triggerMode
         self.onToggle = onToggle
@@ -1390,35 +1408,34 @@ final class HotkeyMonitor {
         }
     }
 
+    private static let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 58, 59, 60, 61, 62]
+
     private func handle(event: NSEvent) {
-        let keyPressed = event.modifierFlags.contains(modifier.flag)
-        // Build "other modifier" set: all standard modifiers except the selected one
         var others: NSEvent.ModifierFlags = [.shift, .option, .command, .control, .function]
         others.remove(modifier.flag)
         let hasOtherModifier = !event.modifierFlags.intersection(others).isEmpty
 
-        if keyPressed && !hasOtherModifier {
+        if event.keyCode == modifier.keyCode {
             if keyDownAt == nil {
-                keyDownAt = Date()
-                otherKeyPressed = false
-            }
-        } else {
-            if let downAt = keyDownAt {
+                // Key press — modifier flag becomes set
+                if event.modifierFlags.contains(modifier.flag) && !hasOtherModifier {
+                    keyDownAt = Date()
+                    otherKeyPressed = false
+                }
+            } else if let downAt = keyDownAt {
+                // Key release — modifier flag clears
                 let elapsed = Date().timeIntervalSince(downAt)
                 let isQuickRelease = elapsed < 0.3 && !otherKeyPressed && !hasOtherModifier
-
-                switch triggerMode {
-                case .singleTap:
-                    if isQuickRelease { onToggle() }
-
-                case .doubleTap:
-                    if isQuickRelease {
+                if isQuickRelease {
+                    switch triggerMode {
+                    case .singleTap:
+                        onToggle()
+                    case .doubleTap:
                         if let firstTap = firstTapAt {
                             if Date().timeIntervalSince(firstTap) < 0.5 {
                                 onToggle()
                                 firstTapAt = nil
                             } else {
-                                // Too slow — treat this tap as the new first tap
                                 firstTapAt = Date()
                             }
                         } else {
@@ -1426,9 +1443,12 @@ final class HotkeyMonitor {
                         }
                     }
                 }
+                keyDownAt = nil
+                otherKeyPressed = false
             }
-            keyDownAt = nil
-            otherKeyPressed = false
+        } else if keyDownAt != nil && Self.modifierKeyCodes.contains(event.keyCode) {
+            // Another modifier pressed while ours is held — mark as chord, don't trigger
+            otherKeyPressed = true
         }
     }
 }
@@ -1437,7 +1457,7 @@ final class HotkeyMonitor {
 
 @MainActor
 final class StatusItemController: NSObject {
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let statusItem = NSStatusBar.system.statusItem(withLength: 28)
     private var cancellable: AnyCancellable?
     private weak var appState: AppState?
 
@@ -1534,16 +1554,43 @@ final class StatusItemController: NSObject {
         }
     }
 
+    private func makeSymbolImage(_ symbol: String) -> NSImage {
+        let size = NSSize(width: 22, height: 22)
+        let img = NSImage(size: size, flipped: false) { rect in
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 16, weight: .medium),
+                .foregroundColor: NSColor.black
+            ]
+            let str = symbol as NSString
+            let strSize = str.size(withAttributes: attrs)
+            let pt = NSPoint(
+                x: (rect.width - strSize.width) / 2,
+                y: (rect.height - strSize.height) / 2
+            )
+            str.draw(at: pt, withAttributes: attrs)
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
     private func updateTitle(for phase: AppPhase) {
-        let sym = UserDefaults.standard.hotkeyModifier.symbol
-        statusItem.button?.title = switch phase {
-        case .idle: sym
-        case .recording: "Rec"
-        case .transcribing: "..."
-        case .done: "✓"
-        case .updating: "↓"
-        case .permissions, .missingColi, .installingColi: "!"
-        case .error: "!"
+        guard let button = statusItem.button else { return }
+        switch phase {
+        case .idle:
+            button.image = makeSymbolImage("◎")
+            button.imagePosition = .imageOnly
+            button.title = ""
+        default:
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = switch phase {
+            case .recording: "Rec"
+            case .transcribing: "..."
+            case .done: "✓"
+            case .updating: "↓"
+            default: "!"
+            }
         }
     }
 
@@ -1754,9 +1801,12 @@ struct OverlayView: View {
                     .foregroundStyle(.primary)
                     .lineLimit(2)
             } else if case .recording = appState.phase {
-                Text(appState.recordingElapsedStr)
+                let nearLimit = appState.recordingElapsedSeconds >= 105  // 1:45
+                Text(nearLimit
+                     ? L("⚠ \(appState.recordingElapsedStr)", "⚠ \(appState.recordingElapsedStr)")
+                     : appState.recordingElapsedStr)
                     .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(nearLimit ? Color.orange : Color.primary)
             } else {
                 Text(appState.phase.subtitle)
                     .font(.system(size: 13))
