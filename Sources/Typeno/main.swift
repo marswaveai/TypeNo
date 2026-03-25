@@ -1,3 +1,4 @@
+import Accelerate
 import AppKit
 import ApplicationServices
 import AVFoundation
@@ -132,15 +133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopRecording() {
+        appState.stopRecording()
         Task { @MainActor in
-            do {
-                try await appState.stopRecording()
-                await appState.transcribeAndInsert()
-            } catch is CancellationError {
-                // User canceled; keep app in reset state
-            } catch {
-                appState.showError(error.localizedDescription)
-            }
+            await appState.transcribeAndInsert()
         }
     }
 
@@ -248,7 +243,7 @@ final class AppState: ObservableObject {
     var onToggleRequest: (() -> Void)?
     var onUpdateRequest: (() -> Void)?
 
-    private let recorder = AudioRecorder()
+    let recorder = AudioEngine()
     private let asrService = ColiASRService()
     private var currentRecordingURL: URL?
     private var previousApp: NSRunningApplication?
@@ -261,12 +256,10 @@ final class AppState: ObservableObject {
         onOverlayRequest?(true)
     }
 
-    func stopRecording() async throws {
+    func stopRecording() {
+        currentRecordingURL = recorder.stop()
         phase = .transcribing()
         onOverlayRequest?(true)
-
-        let url = try await recorder.stop()
-        currentRecordingURL = url
     }
 
     func cancel() {
@@ -539,85 +532,202 @@ enum PermissionManager {
     }
 }
 
-// MARK: - Audio Recorder
+// MARK: - Audio Engine
 
 @MainActor
-final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
-    private var recorder: AVAudioRecorder?
+final class AudioEngine: ObservableObject {
+    @Published var spectrumData: [Float] = Array(repeating: 0, count: 20)
+
+    private var engine: AVAudioEngine?
     private var recordingURL: URL?
-    private var stopContinuation: CheckedContinuation<URL, Error>?
+    private var outputFile: AVAudioFile?
+
+    private let fftSize: Int = 1024
 
     func start() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
-        ]
+        let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
 
-        let recorder = try AVAudioRecorder(url: url, settings: settings)
-        recorder.delegate = self
-        recorder.record()
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        self.recorder = recorder
+        // Target format: 16 kHz mono PCM for ASR
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw TypeNoError.noRecording
+        }
+
+        // Create output file in 16 kHz mono WAV format
+        let file = try AVAudioFile(forWriting: url, settings: targetFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        self.outputFile = file
+
+        // Create converter from input format to 16 kHz mono
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            throw TypeNoError.noRecording
+        }
+
+        let tapBufferSize: AVAudioFrameCount = 4096
+        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat) {
+            [weak self] buffer, _ in
+            guard let self else { return }
+
+            // Compute spectrum from input buffer (native sample rate)
+            let spectrum = self.computeSpectrum(buffer: buffer)
+
+            // Convert to 16 kHz mono and write to file
+            let frameCapacity = AVAudioFrameCount(
+                Double(buffer.frameLength) * 16_000 / inputFormat.sampleRate
+            )
+            guard frameCapacity > 0,
+                  let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCapacity + 16) else {
+                return
+            }
+
+            var error: NSError?
+            nonisolated(unsafe) var allConsumed = false
+            nonisolated(unsafe) let inputBuffer = buffer
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                if allConsumed {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                allConsumed = true
+                outStatus.pointee = .haveData
+                return inputBuffer
+            }
+
+            if error == nil, convertedBuffer.frameLength > 0 {
+                do {
+                    try file.write(from: convertedBuffer)
+                } catch {
+                    // Silently skip write errors during recording
+                }
+            }
+
+            // Publish spectrum on main thread
+            Task { @MainActor [spectrum] in
+                self.spectrumData = spectrum
+            }
+        }
+
+        try engine.start()
+        self.engine = engine
         self.recordingURL = url
         return url
     }
 
-    func stop() async throws -> URL {
-        guard let recordingURL else {
-            throw TypeNoError.noRecording
-        }
-        guard let recorder else {
-            return recordingURL
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            stopContinuation = continuation
-            recorder.stop()
-            self.recorder = nil
-        }
+    func stop() -> URL? {
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
+        outputFile = nil
+        let url = recordingURL
+        recordingURL = nil
+        spectrumData = Array(repeating: 0, count: 20)
+        return url
     }
 
     func cancel() {
-        finishStop(with: .failure(CancellationError()))
-        recorder?.stop()
-        recorder = nil
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
+        outputFile = nil
         if let recordingURL {
             try? FileManager.default.removeItem(at: recordingURL)
         }
         recordingURL = nil
+        spectrumData = Array(repeating: 0, count: 20)
     }
 
-    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        Task { @MainActor in
-            if flag, let recordingURL {
-                finishStop(with: .success(recordingURL))
-            } else {
-                finishStop(with: .failure(TypeNoError.noRecording))
+    // MARK: - FFT Spectrum
+
+    private nonisolated func computeSpectrum(buffer: AVAudioPCMBuffer) -> [Float] {
+        let fftSize = 1024
+        guard let channelData = buffer.floatChannelData?[0] else {
+            return Array(repeating: 0, count: 20)
+        }
+
+        let frameLength = Int(buffer.frameLength)
+        let count = min(frameLength, fftSize)
+
+        // Window the signal
+        var windowed = [Float](repeating: 0, count: fftSize)
+        var window = [Float](repeating: 0, count: count)
+        vDSP_hann_window(&window, vDSP_Length(count), Int32(vDSP_HANN_NORM))
+        vDSP_vmul(channelData, 1, &window, 1, &windowed, 1, vDSP_Length(count))
+
+        // Prepare split complex for FFT
+        let halfN = fftSize / 2
+        var realp = [Float](repeating: 0, count: halfN)
+        var imagp = [Float](repeating: 0, count: halfN)
+
+        realp.withUnsafeMutableBufferPointer { realBuf in
+            imagp.withUnsafeMutableBufferPointer { imagBuf in
+                var splitComplex = DSPSplitComplex(realp: realBuf.baseAddress!, imagp: imagBuf.baseAddress!)
+                windowed.withUnsafeBufferPointer { windowedBuf in
+                    windowedBuf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { complexPtr in
+                        vDSP_ctoz(complexPtr, 2, &splitComplex, 1, vDSP_Length(halfN))
+                    }
+                }
+
+                // Forward FFT
+                let log2n = vDSP_Length(log2(Double(fftSize)))
+                if let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) {
+                    vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+                    vDSP_destroy_fftsetup(fftSetup)
+                }
+
+                // Compute magnitudes
+                var magnitudes = [Float](repeating: 0, count: halfN)
+                vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfN))
+
+                // Convert to dB
+                var one: Float = 1.0
+                var dbMagnitudes = [Float](repeating: 0, count: halfN)
+                vDSP_vdbcon(&magnitudes, 1, &one, &dbMagnitudes, 1, vDSP_Length(halfN), 1)
+                magnitudes = dbMagnitudes
+
+                // Group into 20 bars (logarithmic-ish distribution)
+                let barCount = 20
+                var bars = [Float](repeating: 0, count: barCount)
+                let usableBins = halfN
+                for i in 0..<barCount {
+                    let startFrac = Double(i) / Double(barCount)
+                    let endFrac = Double(i + 1) / Double(barCount)
+                    let startBin = Int(pow(startFrac, 1.5) * Double(usableBins))
+                    let endBin = max(startBin + 1, Int(pow(endFrac, 1.5) * Double(usableBins)))
+                    let clampedEnd = min(endBin, usableBins)
+                    if startBin < clampedEnd {
+                        var sum: Float = 0
+                        vDSP_meanv(Array(magnitudes[startBin..<clampedEnd]), 1, &sum, vDSP_Length(clampedEnd - startBin))
+                        bars[i] = sum
+                    }
+                }
+
+                // Normalize to 0...1 range
+                let minVal: Float = -80
+                let maxVal: Float = 0
+                // Clamp to -80...0 dB range, then normalize
+                for i in 0..<barCount {
+                    bars[i] = (max(minVal, min(maxVal, bars[i])) - minVal) / (maxVal - minVal)
+                }
+
+                // Store result (will be returned)
+                for i in 0..<barCount {
+                    realBuf[i] = bars[i]  // reuse realp buffer temporarily
+                }
             }
-            recordingURL = nil
         }
-    }
 
-    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: (any Error)?) {
-        Task { @MainActor in
-            finishStop(with: .failure(error ?? TypeNoError.noRecording))
-            recordingURL = nil
-        }
-    }
-
-    private func finishStop(with result: Result<URL, Error>) {
-        guard let stopContinuation else { return }
-        self.stopContinuation = nil
-        switch result {
-        case .success(let url): stopContinuation.resume(returning: url)
-        case .failure(let err): stopContinuation.resume(throwing: err)
-        }
+        // Return the 20-bar result (stored in first 20 elements of realp)
+        return Array(realp.prefix(20))
     }
 }
 
@@ -688,11 +798,11 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 120-second timeout for install
+                    // 600-second timeout for install
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning { process.terminate() }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
@@ -779,13 +889,13 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 120-second timeout (model download on first run can be slow)
+                    // 600-second timeout (model download on first run can be slow)
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning {
                             process.terminate()
                         }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
