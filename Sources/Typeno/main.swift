@@ -94,13 +94,6 @@ enum MicrophoneSelection: Equatable {
         }
     }
 
-    var storedValue: String? {
-        switch self {
-        case .automatic: nil
-        case .specific(let uniqueID): uniqueID
-        }
-    }
-
     var uniqueID: String? {
         switch self {
         case .automatic: nil
@@ -140,7 +133,7 @@ extension UserDefaults {
     var microphoneSelection: MicrophoneSelection {
         get { MicrophoneSelection(storedValue: string(forKey: Self.microphoneKey)) }
         set {
-            if let storedValue = newValue.storedValue {
+            if let storedValue = newValue.uniqueID {
                 set(storedValue, forKey: Self.microphoneKey)
             } else {
                 removeObject(forKey: Self.microphoneKey)
@@ -762,13 +755,28 @@ enum MicrophoneManager {
 
 @MainActor
 final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
-    private var captureSession: AVCaptureSession?
-    private var captureOutput: AVCaptureAudioFileOutput?
-    private var recordingURL: URL?
-    private var stopContinuation: CheckedContinuation<URL, Error>?
-    private var discardRecordingOnFinish = false
+    private final class RecordingContext {
+        let session: AVCaptureSession
+        let output: AVCaptureAudioFileOutput
+        let recordingURL: URL
+        var stopContinuation: CheckedContinuation<URL, Error>?
+        var discardRecordingOnFinish = false
+
+        init(session: AVCaptureSession, output: AVCaptureAudioFileOutput, recordingURL: URL) {
+            self.session = session
+            self.output = output
+            self.recordingURL = recordingURL
+        }
+    }
+
+    private var activeContexts: [ObjectIdentifier: RecordingContext] = [:]
+    private var currentRecordingID: ObjectIdentifier?
 
     func start(using microphone: AVCaptureDevice) throws -> URL {
+        guard currentRecordingID == nil else {
+            throw TypeNoError.couldNotStartRecording
+        }
+
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -792,85 +800,88 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
         session.startRunning()
         output.startRecording(to: url, outputFileType: .m4a, recordingDelegate: self)
 
-        self.captureSession = session
-        self.captureOutput = output
-        self.recordingURL = url
-        self.discardRecordingOnFinish = false
+        let context = RecordingContext(session: session, output: output, recordingURL: url)
+        let contextID = ObjectIdentifier(output)
+        activeContexts[contextID] = context
+        currentRecordingID = contextID
         return url
     }
 
     func stop() async throws -> URL {
-        guard let recordingURL else {
+        guard let contextID = currentRecordingID,
+              let context = activeContexts[contextID] else {
             throw TypeNoError.noRecording
         }
-        guard let captureOutput else {
-            return recordingURL
-        }
-        guard captureOutput.isRecording else {
-            tearDownCapturePipeline()
-            return recordingURL
+        guard context.output.isRecording else {
+            tearDownCapturePipeline(for: context)
+            activeContexts.removeValue(forKey: contextID)
+            currentRecordingID = nil
+            return context.recordingURL
         }
 
         return try await withCheckedThrowingContinuation { continuation in
-            stopContinuation = continuation
-            captureOutput.stopRecording()
+            context.stopContinuation = continuation
+            context.output.stopRecording()
         }
     }
 
     func cancel() {
-        finishStop(with: .failure(CancellationError()))
-        let wasRecording = captureOutput?.isRecording == true
-        discardRecordingOnFinish = true
-        captureOutput?.stopRecording()
-        if !wasRecording {
-            tearDownCapturePipeline()
-            if let recordingURL {
-                try? FileManager.default.removeItem(at: recordingURL)
-            }
-            discardRecordingOnFinish = false
+        guard let contextID = currentRecordingID,
+              let context = activeContexts[contextID] else {
+            return
         }
-        recordingURL = nil
+
+        currentRecordingID = nil
+        finishStop(for: contextID, with: .failure(CancellationError()))
+
+        let wasRecording = context.output.isRecording
+        context.discardRecordingOnFinish = true
+        context.output.stopRecording()
+        if !wasRecording {
+            tearDownCapturePipeline(for: context)
+            try? FileManager.default.removeItem(at: context.recordingURL)
+            activeContexts.removeValue(forKey: contextID)
+        }
     }
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {}
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: (any Error)?) {
         Task { @MainActor in
+            let contextID = ObjectIdentifier(output)
+            guard let context = activeContexts[contextID] else { return }
+
             defer {
-                if discardRecordingOnFinish, let outputURL = outputFileURL as URL? {
+                if context.discardRecordingOnFinish, let outputURL = outputFileURL as URL? {
                     try? FileManager.default.removeItem(at: outputURL)
                 }
-                discardRecordingOnFinish = false
-                tearDownCapturePipeline()
-                recordingURL = nil
+                tearDownCapturePipeline(for: context)
+                activeContexts.removeValue(forKey: contextID)
+                if currentRecordingID == contextID {
+                    currentRecordingID = nil
+                }
             }
 
             if let error {
-                finishStop(with: .failure(error))
-            } else if let recordingURL {
-                finishStop(with: .success(recordingURL))
+                finishStop(for: contextID, with: .failure(error))
             } else {
-                finishStop(with: .failure(TypeNoError.noRecording))
+                finishStop(for: contextID, with: .success(context.recordingURL))
             }
         }
     }
 
-    private func tearDownCapturePipeline() {
-        if let captureSession {
-            if captureSession.isRunning {
-                captureSession.stopRunning()
-            }
-            captureSession.inputs.forEach { captureSession.removeInput($0) }
-            captureSession.outputs.forEach { captureSession.removeOutput($0) }
+    private func tearDownCapturePipeline(for context: RecordingContext) {
+        if context.session.isRunning {
+            context.session.stopRunning()
         }
-
-        captureOutput = nil
-        captureSession = nil
+        context.session.inputs.forEach { context.session.removeInput($0) }
+        context.session.outputs.forEach { context.session.removeOutput($0) }
     }
 
-    private func finishStop(with result: Result<URL, Error>) {
-        guard let stopContinuation else { return }
-        self.stopContinuation = nil
+    private func finishStop(for contextID: ObjectIdentifier, with result: Result<URL, Error>) {
+        guard let context = activeContexts[contextID],
+              let stopContinuation = context.stopContinuation else { return }
+        context.stopContinuation = nil
         switch result {
         case .success(let url): stopContinuation.resume(returning: url)
         case .failure(let err): stopContinuation.resume(throwing: err)
