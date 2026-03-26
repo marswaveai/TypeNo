@@ -418,6 +418,7 @@ final class AppState: ObservableObject {
     }
 
     func cancel() {
+        let targetApp = previousApp
         recordingTimer?.invalidate()
         recordingTimer = nil
         recorder.cancel()
@@ -427,8 +428,12 @@ final class AppState: ObservableObject {
         }
         currentRecordingURL = nil
         transcript = ""
+        previousApp = nil
         phase = .idle
         onOverlayRequest?(false)
+        if let targetApp {
+            targetApp.activate()
+        }
     }
 
     func showPermissions(_ missing: Set<PermissionKind>) {
@@ -506,6 +511,8 @@ final class AppState: ObservableObject {
             phase = .done(transcript)
             onOverlayRequest?(true)
             confirmInsert()
+        } catch is CancellationError {
+            // User canceled the current transcription with Esc.
         } catch TypeNoError.coliNotInstalled {
             showMissingColi()
         } catch {
@@ -578,6 +585,8 @@ final class AppState: ObservableObject {
             NSPasteboard.general.setString(transcript, forType: .string)
             try? await Task.sleep(for: .seconds(2))
             cancel()
+        } catch is CancellationError {
+            // User canceled the current transcription with Esc.
         } catch TypeNoError.coliNotInstalled {
             showMissingColi()
         } catch {
@@ -838,10 +847,14 @@ final class ColiASRService: @unchecked Sendable {
 
     private var currentProcess: Process?
     private let processLock = NSLock()
+    private var currentProcessWasCancelled = false
 
     func cancelCurrentProcess() {
         processLock.lock()
         let proc = currentProcess
+        if proc != nil {
+            currentProcessWasCancelled = true
+        }
         currentProcess = nil
         processLock.unlock()
         if let proc, proc.isRunning {
@@ -916,6 +929,7 @@ final class ColiASRService: @unchecked Sendable {
                     }
 
                     self?.processLock.lock()
+                    self?.currentProcessWasCancelled = false
                     self?.currentProcess = process
                     self?.processLock.unlock()
 
@@ -942,10 +956,15 @@ final class ColiASRService: @unchecked Sendable {
                     stderrHandle.readabilityHandler = nil
 
                     self?.processLock.lock()
+                    let wasCancelled = self?.currentProcessWasCancelled ?? false
+                    self?.currentProcessWasCancelled = false
                     self?.currentProcess = nil
                     self?.processLock.unlock()
 
                     guard process.terminationReason != .uncaughtSignal else {
+                        if wasCancelled {
+                            throw CancellationError()
+                        }
                         let diagnostics = Self.timeoutDiagnostics(
                             stdout: String(data: stdoutBuf.read(), encoding: .utf8) ?? "",
                             stderr: String(data: stderrBuf.read(), encoding: .utf8) ?? ""
@@ -1520,36 +1539,65 @@ extension StatusItemController: NSWindowDelegate {
 // MARK: - Overlay Panel
 
 @MainActor
+final class EscapeAwarePanel: NSPanel {
+    var onEscape: (() -> Void)?
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {
+            onEscape?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        onEscape?()
+    }
+}
+
+@MainActor
 final class OverlayPanelController {
-    private let panel: NSPanel
-    private let hostingView: NSHostingView<OverlayView>
+    private let hudPanel: NSPanel
+    private let capturePanel: EscapeAwarePanel
+    private let hudHostingView: NSHostingView<OverlayView>
+    private let captureHostingView: NSHostingView<OverlayView>
     private let appState: AppState
 
     init(appState: AppState) {
         self.appState = appState
-        let overlayView = OverlayView(appState: appState)
-        hostingView = NSHostingView(rootView: overlayView)
+        hudHostingView = NSHostingView(rootView: OverlayView(appState: appState))
+        captureHostingView = NSHostingView(rootView: OverlayView(appState: appState))
 
-        panel = NSPanel(
+        hudPanel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        capturePanel = EscapeAwarePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
 
-        panel.isFloatingPanel = true
-        panel.level = .statusBar
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.hidesOnDeactivate = false
-        panel.contentView = hostingView
+        configure(panel: hudPanel, contentView: hudHostingView)
+        configure(panel: capturePanel, contentView: captureHostingView)
+        capturePanel.onEscape = { [weak appState] in
+            appState?.onCancel?()
+        }
     }
 
     func show() {
-        hostingView.invalidateIntrinsicContentSize()
-        let idealSize = hostingView.fittingSize
+        let activePanel = panel(for: appState.phase)
+        let activeHostingView = hostingView(for: appState.phase)
+        let inactivePanel = inactivePanel(for: appState.phase)
+
+        activeHostingView.invalidateIntrinsicContentSize()
+        let idealSize = activeHostingView.fittingSize
         let width = max(idealSize.width, 240)
         let height = max(idealSize.height, 44)
 
@@ -1574,15 +1622,56 @@ final class OverlayPanelController {
                 y = frame.minY + 48
             }
 
-            panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+            activePanel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
         } else {
-            panel.setContentSize(NSSize(width: width, height: height))
+            activePanel.setContentSize(NSSize(width: width, height: height))
         }
-        panel.orderFrontRegardless()
+
+        if shouldCaptureKeyboard(for: appState.phase) {
+            NSApp.activate(ignoringOtherApps: true)
+            capturePanel.makeKeyAndOrderFront(nil)
+            capturePanel.makeFirstResponder(capturePanel.contentView)
+        } else {
+            activePanel.orderFrontRegardless()
+        }
+        inactivePanel.orderOut(nil)
     }
 
     func hide() {
-        panel.orderOut(nil)
+        hudPanel.orderOut(nil)
+        capturePanel.orderOut(nil)
+    }
+
+    private func shouldCaptureKeyboard(for phase: AppPhase) -> Bool {
+        switch phase {
+        case .recording, .transcribing:
+            true
+        default:
+            false
+        }
+    }
+
+    private func configure(panel: NSPanel, contentView: NSView) {
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false
+        panel.contentView = contentView
+    }
+
+    private func panel(for phase: AppPhase) -> NSPanel {
+        shouldCaptureKeyboard(for: phase) ? capturePanel : hudPanel
+    }
+
+    private func hostingView(for phase: AppPhase) -> NSHostingView<OverlayView> {
+        shouldCaptureKeyboard(for: phase) ? captureHostingView : hudHostingView
+    }
+
+    private func inactivePanel(for phase: AppPhase) -> NSPanel {
+        shouldCaptureKeyboard(for: phase) ? hudPanel : capturePanel
     }
 }
 

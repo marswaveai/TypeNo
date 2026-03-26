@@ -50,6 +50,16 @@ TypeNo needs two one-time permissions:
 
 The app will guide you through granting these on first launch.
 
+### Troubleshooting: Accessibility Permission Not Working
+
+Some users find that enabling TypeNo in **System Settings → Privacy & Security → Accessibility** has no effect — a known macOS bug. The fix:
+
+1. Select **TypeNo** in the list
+2. Click **−** to remove it
+3. Click **+** and re-add TypeNo from `/Applications`
+
+![Accessibility permission fix](assets/accessibility-fix.gif)
+
 ### Option 2 — Build from Source
 
 ```bash
