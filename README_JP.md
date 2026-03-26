@@ -66,6 +66,7 @@ scripts/build_app.sh
 |---|---|
 | 録音の開始/停止 | `Control` を短く押す（300ms以内、他のキーなし） |
 | 録音の開始/停止 | メニューバー → Record |
+| マイクを選択 | メニューバー → Microphone → Automatic / デバイス名 |
 | ファイルの文字起こし | `.m4a`/`.mp3`/`.wav`/`.aac` をメニューバーアイコンにドラッグ |
 | アップデート確認 | メニューバー → Check for Updates... |
 | 終了 | メニューバー → Quit（`⌘Q`） |

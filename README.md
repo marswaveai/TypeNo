@@ -67,6 +67,7 @@ The app will be at `dist/TypeNo.app`. Move it to `/Applications/` for persistent
 |---|---|
 | Start/stop recording | Short-press `Control` (< 300ms, no other keys) |
 | Start/stop recording | Menu bar → Record |
+| Choose microphone | Menu bar → Microphone → Automatic / specific device |
 | Transcribe a file | Drag `.m4a`/`.mp3`/`.wav`/`.aac` to the menu bar icon |
 | Check for updates | Menu bar → Check for Updates... |
 | Quit | Menu bar → Quit (`⌘Q`) |
