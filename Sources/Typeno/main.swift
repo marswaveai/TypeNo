@@ -791,20 +791,23 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
 
         let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
         let session = AVCaptureSession()
-        session.beginConfiguration()
-
-        let input = try AVCaptureDeviceInput(device: microphone)
-        guard session.canAddInput(input) else {
-            throw TypeNoError.couldNotUseMicrophone(microphone.localizedName)
-        }
-        session.addInput(input)
-
         let output = AVCaptureAudioFileOutput()
-        guard session.canAddOutput(output) else {
-            throw TypeNoError.couldNotStartRecording
+
+        do {
+            session.beginConfiguration()
+            defer { session.commitConfiguration() }
+
+            let input = try AVCaptureDeviceInput(device: microphone)
+            guard session.canAddInput(input) else {
+                throw TypeNoError.couldNotUseMicrophone(microphone.localizedName)
+            }
+            session.addInput(input)
+
+            guard session.canAddOutput(output) else {
+                throw TypeNoError.couldNotStartRecording
+            }
+            session.addOutput(output)
         }
-        session.addOutput(output)
-        session.commitConfiguration()
 
         session.startRunning()
         output.startRecording(to: url, outputFileType: .m4a, recordingDelegate: self)
@@ -856,8 +859,8 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {}
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: (any Error)?) {
+        let contextID = ObjectIdentifier(output)
         Task { @MainActor in
-            let contextID = ObjectIdentifier(output)
             guard let context = activeContexts[contextID] else { return }
 
             defer {
