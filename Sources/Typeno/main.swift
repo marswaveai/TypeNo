@@ -866,6 +866,9 @@ final class ColiASRService: @unchecked Sendable {
         guard let coliPath = Self.findColiPath() else {
             throw TypeNoError.coliNotInstalled
         }
+        if let modelIssue = Self.detectIncompleteModelDownload() {
+            throw TypeNoError.transcriptionFailed(modelIssue)
+        }
 
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -877,7 +880,9 @@ final class ColiASRService: @unchecked Sendable {
                     // Inherit a proper PATH so node/bun can be found
                     var env = ProcessInfo.processInfo.environment
                     let home = env["HOME"] ?? ""
+                    let coliDir = (coliPath as NSString).deletingLastPathComponent
                     let extraPaths = [
+                        coliDir,
                         "/opt/homebrew/bin",
                         "/usr/local/bin",
                         home + "/.nvm/versions/node/",  // nvm
@@ -960,7 +965,11 @@ final class ColiASRService: @unchecked Sendable {
                         if wasCancelled {
                             throw CancellationError()
                         }
-                        throw TypeNoError.transcriptionFailed("Transcription timed out")
+                        let diagnostics = Self.timeoutDiagnostics(
+                            stdout: String(data: stdoutBuf.read(), encoding: .utf8) ?? "",
+                            stderr: String(data: stderrBuf.read(), encoding: .utf8) ?? ""
+                        )
+                        throw TypeNoError.transcriptionFailed(diagnostics)
                     }
 
                     let output = String(data: stdoutBuf.read(), encoding: .utf8) ?? ""
@@ -996,6 +1005,46 @@ final class ColiASRService: @unchecked Sendable {
             return "http://\(host):\(port)"
         }
         return nil
+    }
+
+    private static func detectIncompleteModelDownload() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let modelsDir = home.appendingPathComponent(".coli/models", isDirectory: true)
+        let senseVoiceDir = modelsDir.appendingPathComponent(
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+            isDirectory: true
+        )
+        let senseVoiceCheckFile = senseVoiceDir.appendingPathComponent("model.int8.onnx")
+        let senseVoiceArchive = modelsDir.appendingPathComponent(
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+        )
+
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: senseVoiceCheckFile.path) && fm.fileExists(atPath: senseVoiceArchive.path) {
+            return "Coli model download looks incomplete. Delete \(senseVoiceArchive.path) and try again."
+        }
+
+        return nil
+    }
+
+    private static func timeoutDiagnostics(stdout: String, stderr: String) -> String {
+        let combined = [stdout, stderr]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+
+        if combined.isEmpty {
+            return "Transcription timed out. Coli may still be downloading its first model, or the network/proxy may be blocking GitHub."
+        }
+
+        let condensed = combined
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .suffix(6)
+            .joined(separator: " | ")
+
+        return "Transcription timed out. Coli output: \(condensed)"
     }
 
     static func findNpmPath() -> String? {
