@@ -159,9 +159,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var hotkeyMonitor: HotkeyMonitor?
     private var overlayController: OverlayPanelController?
+    private var phaseCancellable: AnyCancellable?
     private var permissionsGranted = false
     private var pollTimer: Timer?
     private let updateService = UpdateService()
+    private lazy var escapeInterceptor = EscapeInterceptor { [weak self] in
+        Task { @MainActor in
+            self?.cancelFlow()
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -191,6 +197,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 self?.overlayController?.hide()
             }
+        }
+
+        phaseCancellable = appState.$phase.sink { [weak self] phase in
+            self?.updateEscapeInterception(for: phase)
         }
 
         appState.onPermissionOpen = { [weak self] kind in
@@ -230,10 +240,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func updateEscapeInterception(for phase: AppPhase) {
+        switch phase {
+        case .recording, .transcribing:
+            escapeInterceptor.start()
+        default:
+            escapeInterceptor.stop()
+        }
+    }
+
     private func pollStatus() {
         switch appState.phase {
         case .permissions:
-            let missing = PermissionManager.missingPermissions(requestMicrophoneIfNeeded: false)
+            let missing = PermissionManager.missingPermissions(
+                requestMicrophoneIfNeeded: false,
+                requestInputMonitoringIfNeeded: false
+            )
             if missing.isEmpty {
                 permissionsGranted = true
                 appState.hidePermissions()
@@ -280,7 +302,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startRecording() {
         // Only check permissions if not previously granted this session
         if !permissionsGranted {
-            let missing = PermissionManager.missingPermissions(requestMicrophoneIfNeeded: true, requestAccessibilityIfNeeded: true)
+            let missing = PermissionManager.missingPermissions(
+                requestMicrophoneIfNeeded: true,
+                requestAccessibilityIfNeeded: true,
+                requestInputMonitoringIfNeeded: true
+            )
             if !missing.isEmpty {
                 appState.showPermissions(missing)
                 return
@@ -351,16 +377,111 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+final class EscapeInterceptor: @unchecked Sendable {
+    private let onEscape: () -> Void
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var isRunning = false
+
+    init(onEscape: @escaping () -> Void) {
+        self.onEscape = onEscape
+    }
+
+    func start() {
+        guard !isRunning else { return }
+
+        let events = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(events),
+            callback: escapeEventTapCallback,
+            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        ) else {
+            NSLog("TypeNo: failed to create escape event tap")
+            return
+        }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+
+        eventTap = tap
+        runLoopSource = source
+        isRunning = true
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        eventTap = nil
+        runLoopSource = nil
+        isRunning = false
+    }
+
+    private static let escapeKeyCode: Int64 = 53
+
+    fileprivate func handleEvent(
+        _ type: CGEventType,
+        _ event: CGEvent,
+    ) -> Unmanaged<CGEvent>? {
+        switch type {
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+
+        case .keyDown, .keyUp:
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            guard keyCode == Self.escapeKeyCode else {
+                return Unmanaged.passUnretained(event)
+            }
+            if type == .keyDown {
+                DispatchQueue.main.async {
+                    self.onEscape()
+                }
+            }
+            return nil
+
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+    }
+}
+
+private func escapeEventTapCallback(
+    _ proxy: CGEventTapProxy,
+    _ type: CGEventType,
+    _ event: CGEvent,
+    _ userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    guard let userInfo else {
+        return Unmanaged.passUnretained(event)
+    }
+
+    let interceptor = Unmanaged<EscapeInterceptor>.fromOpaque(userInfo).takeUnretainedValue()
+    return interceptor.handleEvent(type, event)
+}
+
 // MARK: - Model
 
 enum PermissionKind: CaseIterable, Hashable {
     case microphone
     case accessibility
+    case inputMonitoring
 
     var title: String {
         switch self {
         case .microphone: L("Microphone", "麦克风")
         case .accessibility: L("Accessibility", "辅助功能")
+        case .inputMonitoring: L("Input Monitoring", "输入监控")
         }
     }
 
@@ -368,6 +489,7 @@ enum PermissionKind: CaseIterable, Hashable {
         switch self {
         case .microphone: L("Required to capture your voice", "用于捕获语音")
         case .accessibility: L("Required to type text into apps", "用于向应用输入文字")
+        case .inputMonitoring: L("Required to cancel recording with Esc without stealing focus", "用于在不抢占焦点时用 Esc 取消录音")
         }
     }
 
@@ -375,6 +497,7 @@ enum PermissionKind: CaseIterable, Hashable {
         switch self {
         case .microphone: "mic.fill"
         case .accessibility: "hand.raised.fill"
+        case .inputMonitoring: "keyboard"
         }
     }
 }
@@ -666,7 +789,11 @@ enum TypeNoError: LocalizedError {
 // MARK: - Permission Manager
 
 enum PermissionManager {
-    static func missingPermissions(requestMicrophoneIfNeeded: Bool, requestAccessibilityIfNeeded: Bool = false) -> Set<PermissionKind> {
+    static func missingPermissions(
+        requestMicrophoneIfNeeded: Bool,
+        requestAccessibilityIfNeeded: Bool = false,
+        requestInputMonitoringIfNeeded: Bool = false
+    ) -> Set<PermissionKind> {
         var missing = Set<PermissionKind>()
 
         switch microphoneStatus(requestIfNeeded: requestMicrophoneIfNeeded) {
@@ -678,6 +805,10 @@ enum PermissionManager {
 
         if !accessibilityStatus(requestIfNeeded: requestAccessibilityIfNeeded) {
             missing.insert(.accessibility)
+        }
+
+        if !inputMonitoringStatus(requestIfNeeded: requestInputMonitoringIfNeeded) {
+            missing.insert(.inputMonitoring)
         }
 
         return missing
@@ -701,12 +832,21 @@ enum PermissionManager {
         return AXIsProcessTrustedWithOptions(options)
     }
 
+    static func inputMonitoringStatus(requestIfNeeded: Bool) -> Bool {
+        if requestIfNeeded {
+            return CGRequestListenEventAccess()
+        }
+        return CGPreflightListenEventAccess()
+    }
+
     static func openPrivacySettings(for permissions: Set<PermissionKind>) {
         let urlString: String
         if permissions.contains(.accessibility) {
             urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         } else if permissions.contains(.microphone) {
             urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        } else if permissions.contains(.inputMonitoring) {
+            urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
         } else {
             urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy"
         }
@@ -1761,65 +1901,27 @@ extension StatusItemController: NSWindowDelegate, NSMenuDelegate {
 // MARK: - Overlay Panel
 
 @MainActor
-final class EscapeAwarePanel: NSPanel {
-    var onEscape: (() -> Void)?
-
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 {
-            onEscape?()
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    override func cancelOperation(_ sender: Any?) {
-        onEscape?()
-    }
-}
-
-@MainActor
 final class OverlayPanelController {
-    private let hudPanel: NSPanel
-    private let capturePanel: EscapeAwarePanel
-    private let hudHostingView: NSHostingView<OverlayView>
-    private let captureHostingView: NSHostingView<OverlayView>
+    private let panel: NSPanel
+    private let hostingView: NSHostingView<OverlayView>
     private let appState: AppState
 
     init(appState: AppState) {
         self.appState = appState
-        hudHostingView = NSHostingView(rootView: OverlayView(appState: appState))
-        captureHostingView = NSHostingView(rootView: OverlayView(appState: appState))
+        hostingView = NSHostingView(rootView: OverlayView(appState: appState))
 
-        hudPanel = NSPanel(
+        panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        capturePanel = EscapeAwarePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-
-        configure(panel: hudPanel, contentView: hudHostingView)
-        configure(panel: capturePanel, contentView: captureHostingView)
-        capturePanel.onEscape = { [weak appState] in
-            appState?.onCancel?()
-        }
+        configure(panel: panel, contentView: hostingView)
     }
 
     func show() {
-        let activePanel = panel(for: appState.phase)
-        let activeHostingView = hostingView(for: appState.phase)
-        let inactivePanel = inactivePanel(for: appState.phase)
-
-        activeHostingView.invalidateIntrinsicContentSize()
-        let idealSize = activeHostingView.fittingSize
+        hostingView.invalidateIntrinsicContentSize()
+        let idealSize = hostingView.fittingSize
         let width = max(idealSize.width, 240)
         let height = max(idealSize.height, 44)
 
@@ -1844,33 +1946,16 @@ final class OverlayPanelController {
                 y = frame.minY + 48
             }
 
-            activePanel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+            panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
         } else {
-            activePanel.setContentSize(NSSize(width: width, height: height))
+            panel.setContentSize(NSSize(width: width, height: height))
         }
 
-        if shouldCaptureKeyboard(for: appState.phase) {
-            NSApp.activate(ignoringOtherApps: true)
-            capturePanel.makeKeyAndOrderFront(nil)
-            capturePanel.makeFirstResponder(capturePanel.contentView)
-        } else {
-            activePanel.orderFrontRegardless()
-        }
-        inactivePanel.orderOut(nil)
+        panel.orderFrontRegardless()
     }
 
     func hide() {
-        hudPanel.orderOut(nil)
-        capturePanel.orderOut(nil)
-    }
-
-    private func shouldCaptureKeyboard(for phase: AppPhase) -> Bool {
-        switch phase {
-        case .recording, .transcribing:
-            true
-        default:
-            false
-        }
+        panel.orderOut(nil)
     }
 
     private func configure(panel: NSPanel, contentView: NSView) {
@@ -1882,18 +1967,6 @@ final class OverlayPanelController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.contentView = contentView
-    }
-
-    private func panel(for phase: AppPhase) -> NSPanel {
-        shouldCaptureKeyboard(for: phase) ? capturePanel : hudPanel
-    }
-
-    private func hostingView(for phase: AppPhase) -> NSHostingView<OverlayView> {
-        shouldCaptureKeyboard(for: phase) ? captureHostingView : hudHostingView
-    }
-
-    private func inactivePanel(for phase: AppPhase) -> NSPanel {
-        shouldCaptureKeyboard(for: phase) ? hudPanel : capturePanel
     }
 }
 
