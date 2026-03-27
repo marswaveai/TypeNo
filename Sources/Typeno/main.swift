@@ -1018,6 +1018,25 @@ final class ColiASRService: @unchecked Sendable {
             throw TypeNoError.transcriptionFailed(modelIssue)
         }
 
+        // Retry once on failure (handles transient issues like ffmpeg not found)
+        var lastError: Error?
+        for attempt in 0..<2 {
+            do {
+                return try await runTranscription(fileURL: fileURL, coliPath: coliPath)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                if attempt == 0 {
+                    // Brief delay before retry
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+            }
+        }
+        throw lastError!
+    }
+
+    private func runTranscription(fileURL: URL, coliPath: String) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 do {
@@ -1025,7 +1044,7 @@ final class ColiASRService: @unchecked Sendable {
                     process.executableURL = URL(fileURLWithPath: coliPath)
                     process.arguments = ["asr", fileURL.path]
 
-                    // Inherit a proper PATH so node/bun can be found
+                    // Inherit a proper PATH so node/bun/ffmpeg can be found
                     var env = ProcessInfo.processInfo.environment
                     let home = env["HOME"] ?? ""
                     let coliDir = (coliPath as NSString).deletingLastPathComponent
