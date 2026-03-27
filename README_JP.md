@@ -22,7 +22,24 @@
 
 ## インストール
 
-### 方法 1：アプリをダウンロード
+### 依存関係のインストール
+
+- 音声認識エンジン
+
+TypeNo はローカル音声認識に [coli](https://github.com/marswaveai/coli) を使用します：
+
+```bash
+npm install -g @marswave/coli
+```
+
+- 中国語簡体/繁体変換
+音声エンジンはデフォルトで簡体字中国語を出力します。デフォルトは元の AST 結果です。繁体字に変換するには OpenCC をインストールしてください：
+
+```bash
+brew install opencc
+```
+
+### 本プロジェクトのインストール（方法 1：アプリをダウンロード）
 
 - [TypeNo for macOS をダウンロード](https://github.com/marswaveai/TypeNo/releases/latest)
 - 最新の `TypeNo.app.zip` をダウンロード
@@ -31,15 +48,7 @@
 
 TypeNo は Apple の署名と公証済みです。警告なしでそのまま開けます。
 
-### 音声認識エンジンをインストール
-
-TypeNo はローカル音声認識に [coli](https://github.com/marswaveai/coli) を使用します：
-
-```bash
-npm install -g @marswave/coli
-```
-
-未インストールの場合、アプリ内でガイダンスが表示されます。
+Coli が未インストールの場合、アプリ内でガイダンスが表示されます。
 
 ### 初回起動
 
@@ -59,7 +68,7 @@ TypeNo には一度だけ次の2つの権限が必要です：
 
 ![アクセシビリティ権限の修正](assets/accessibility-fix.gif)
 
-### 方法 2：ソースからビルド
+### 本プロジェクトのインストール（方法 2：ソースからビルド）
 
 ```bash
 git clone https://github.com/marswaveai/TypeNo.git

@@ -22,7 +22,24 @@
 
 ## 安装
 
-### 方式一：直接下载
+### 安装依赖
+
+- 语音识别引擎
+
+TypeNo 使用 [coli](https://github.com/marswaveai/coli) 进行本地语音识别：
+
+```bash
+npm install -g @marswave/coli
+```
+
+- 中文繁简转换
+语音引擎默认输出简体中文，默认输出为原始 AST 结果。如需转换为繁体中文，请安装 OpenCC：
+
+```bash
+brew install opencc
+```
+
+### 安装本项目（方式一：直接下载 App）
 
 - [下载 TypeNo for macOS](https://github.com/marswaveai/TypeNo/releases/latest)
 - 下载最新的 `TypeNo.app.zip`
@@ -30,14 +47,6 @@
 - 打开 TypeNo
 
 TypeNo 已通过 Apple 签名和公证，可以直接打开使用。
-
-### 安装语音识别引擎
-
-TypeNo 使用 [coli](https://github.com/marswaveai/coli) 进行本地语音识别：
-
-```bash
-npm install -g @marswave/coli
-```
 
 如果未安装 Coli，TypeNo 会在应用内弹出引导提示。
 
@@ -59,7 +68,7 @@ TypeNo 需要两个一次性授权：
 
 ![辅助功能权限修复](assets/accessibility-fix.gif)
 
-### 方式二：从源码构建
+### 安装本项目（方式二：从源码构建）
 
 ```bash
 git clone https://github.com/marswaveai/TypeNo.git

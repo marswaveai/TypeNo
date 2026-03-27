@@ -22,7 +22,24 @@ That's it. No windows, no settings, no accounts.
 
 ## Install
 
-### Option 1 — Download the App
+### Install dependencies
+
+- The speech engine
+
+TypeNo uses [coli](https://github.com/marswaveai/coli) for local speech recognition:
+
+```bash
+npm install -g @marswave/coli
+```
+
+- Chinese Conversion
+The speech engine outputs Simplified Chinese by default. The default output is the original AST result. To convert it to Traditional Chinese, use OpenCC.
+
+``` bash
+brew install opencc
+```
+
+### Install this project (Option 1 — Download the App)
 
 - [Download TypeNo for macOS](https://github.com/marswaveai/TypeNo/releases/latest)
 - Download the latest `TypeNo.app.zip`
@@ -32,13 +49,6 @@ That's it. No windows, no settings, no accounts.
 
 TypeNo is signed and notarized by Apple — it should open without any warnings.
 
-### Install the speech engine
-
-TypeNo uses [coli](https://github.com/marswaveai/coli) for local speech recognition:
-
-```bash
-npm install -g @marswave/coli
-```
 
 If Coli is missing, TypeNo will show an in-app setup prompt with the install command.
 
@@ -60,7 +70,7 @@ Some users find that enabling TypeNo in **System Settings → Privacy & Security
 
 ![Accessibility permission fix](assets/accessibility-fix.gif)
 
-### Option 2 — Build from Source
+### Install this project (Option 2 — Build from Source)
 
 ```bash
 git clone https://github.com/marswaveai/TypeNo.git
