@@ -582,10 +582,7 @@ final class AppState: ObservableObject {
 
         do {
             let text = try await asrService.transcribe(fileURL: url)
-            let converted = try ColiASRService.convertChinese(
-                text,
-                conversion: UserDefaults.standard.chineseConversion
-            )
+            let converted = try await convertChineseAsync(text, conversion: UserDefaults.standard.chineseConversion)
             transcript = converted.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
@@ -657,10 +654,7 @@ final class AppState: ObservableObject {
 
         do {
             let text = try await asrService.transcribe(fileURL: url)
-            let converted = try ColiASRService.convertChinese(
-                text,
-                conversion: UserDefaults.standard.chineseConversion
-            )
+            let converted = try await convertChineseAsync(text, conversion: UserDefaults.standard.chineseConversion)
             transcript = converted.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
@@ -680,6 +674,20 @@ final class AppState: ObservableObject {
             showMissingColi()
         } catch {
             showError(error.localizedDescription)
+        }
+    }
+
+    /// Converts Chinese text using OpenCC on a background queue.
+    func convertChineseAsync(_ text: String, conversion: ChineseConversion) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let result = try ColiASRService.convertChinese(text, conversion: conversion)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
 }
