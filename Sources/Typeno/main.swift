@@ -351,6 +351,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - History Model
+
+struct TranscriptionHistoryItem: Codable, Identifiable {
+    let id: UUID
+    let text: String
+    let timestamp: Date
+
+    init(text: String) {
+        self.id = UUID()
+        self.text = text
+        self.timestamp = Date()
+    }
+}
+
+// MARK: - History Manager
+
+@MainActor
+class HistoryManager {
+    static let shared = HistoryManager()
+    private let fileURL: URL
+    private let maxCount = 10
+    private(set) var items: [TranscriptionHistoryItem] = []
+
+    private init() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("TypeNo")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        self.fileURL = dir.appendingPathComponent("history.json")
+        load()
+    }
+
+    func add(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        // Avoid duplicates: remove existing item with same text
+        items.removeAll { $0.text == trimmed }
+
+        // Add new item at the beginning
+        items.insert(TranscriptionHistoryItem(text: trimmed), at: 0)
+
+        // Keep only maxCount items
+        if items.count > maxCount {
+            items = Array(items.prefix(maxCount))
+        }
+
+        save()
+    }
+
+    func clear() {
+        items.removeAll()
+        save()
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([TranscriptionHistoryItem].self, from: data) else {
+            return
+        }
+        items = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        try? data.write(to: fileURL)
+    }
+}
+
 // MARK: - Model
 
 enum PermissionKind: CaseIterable, Hashable {
@@ -571,6 +639,9 @@ final class AppState: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
 
+        // Save to history
+        HistoryManager.shared.add(text)
+
         // Hide overlay
         onOverlayRequest?(false)
 
@@ -621,6 +692,8 @@ final class AppState: ObservableObject {
             // Copy to clipboard (don't paste into another app)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(transcript, forType: .string)
+            // Save to history
+            HistoryManager.shared.add(transcript)
             try? await Task.sleep(for: .seconds(2))
             cancel()
         } catch is CancellationError {
@@ -1493,6 +1566,9 @@ final class StatusItemController: NSObject {
         static let microphone = 250
         static let hotkeyBase = 300
         static let triggerBase = 400
+        static let recentHistory = 500
+        static let recentHistoryItemBase = 501
+        static let clearHistory = 600
     }
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: 28)
@@ -1537,6 +1613,12 @@ final class StatusItemController: NSObject {
         let transcribeItem = NSMenuItem(title: L("Transcribe File to Clipboard...", "转录文件到剪贴板..."), action: #selector(transcribeFile), keyEquivalent: "")
         transcribeItem.target = self
         menu.addItem(transcribeItem)
+
+        // Recent History sub-menu
+        let recentItem = NSMenuItem(title: L("Recent", "最近记录"), action: nil, keyEquivalent: "")
+        recentItem.tag = MenuTag.recentHistory
+        menu.setSubmenu(makeRecentHistorySubmenu(), for: recentItem)
+        menu.addItem(recentItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -1628,10 +1710,47 @@ final class StatusItemController: NSObject {
         return submenu
     }
 
+    private func makeRecentHistorySubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        let items = HistoryManager.shared.items
+
+        if items.isEmpty {
+            let emptyItem = NSMenuItem(title: L("No recent items", "暂无记录"), action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            submenu.addItem(emptyItem)
+        } else {
+            for (index, item) in items.enumerated() {
+                // Truncate text for display (max 50 chars)
+                let displayText = item.text.count > 50 ? String(item.text.prefix(50)) + "..." : item.text
+                let historyItem = NSMenuItem(title: displayText, action: #selector(copyHistoryItem(_:)), keyEquivalent: "")
+                historyItem.target = self
+                historyItem.tag = MenuTag.recentHistoryItemBase + index
+                historyItem.representedObject = item.text
+                historyItem.toolTip = item.text
+                submenu.addItem(historyItem)
+            }
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+        let clearItem = NSMenuItem(title: L("Clear Recent History", "清空最近记录"), action: #selector(clearHistory), keyEquivalent: "")
+        clearItem.target = self
+        clearItem.tag = MenuTag.clearHistory
+        clearItem.isEnabled = !items.isEmpty
+        submenu.addItem(clearItem)
+
+        return submenu
+    }
+
     private func refreshMicrophoneSubmenu() {
         guard let menu = statusItem.menu,
               let microphoneItem = menu.item(withTag: MenuTag.microphone) else { return }
         menu.setSubmenu(makeMicrophoneSubmenu(), for: microphoneItem)
+    }
+
+    private func refreshRecentHistorySubmenu() {
+        guard let menu = statusItem.menu,
+              let recentItem = menu.item(withTag: MenuTag.recentHistory) else { return }
+        menu.setSubmenu(makeRecentHistorySubmenu(), for: recentItem)
     }
 
     private func updateRecordMenuItem(for phase: AppPhase) {
@@ -1716,6 +1835,17 @@ final class StatusItemController: NSObject {
         NotificationCenter.default.post(name: .hotkeyConfigChanged, object: nil)
     }
 
+    @objc private func copyHistoryItem(_ sender: NSMenuItem) {
+        guard let text = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @objc private func clearHistory() {
+        HistoryManager.shared.clear()
+        refreshRecentHistorySubmenu()
+    }
+
     @objc private func openPrivacySettings() {
         PermissionManager.openPrivacySettings(for: [])
     }
@@ -1761,6 +1891,7 @@ final class StatusItemController: NSObject {
 extension StatusItemController: NSWindowDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         refreshMicrophoneSubmenu()
+        refreshRecentHistorySubmenu()
     }
 
     func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {

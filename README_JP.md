@@ -97,6 +97,8 @@ scripts/build_app.sh
 | 録音の開始/停止 | メニューバー → Record |
 | マイクを選択 | メニューバー → Microphone → Automatic / デバイス名 |
 | ファイルの文字起こし | `.m4a`/`.mp3`/`.wav`/`.aac` をメニューバーアイコンにドラッグ |
+| 最近の文字起こしを表示 | メニューバー → Recent → クリックでコピー |
+| 履歴をクリア | メニューバー → Recent → Clear Recent History |
 | アップデート確認 | メニューバー → Check for Updates... |
 | 終了 | メニューバー → Quit（`⌘Q`） |
 
