@@ -997,7 +997,12 @@ final class ColiASRService: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            // If OpenCC cannot be launched, gracefully degrade
+            return text
+        }
 
         if let data = text.data(using: .utf8) {
             stdinPipe.fileHandleForWriting.write(data)
