@@ -1005,6 +1005,21 @@ final class ColiASRService: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Read pipe data asynchronously to avoid deadlock when buffer fills up
+        let stdoutBuf = LockedData()
+        let stderrBuf = LockedData()
+        let stdoutHandle = stdoutPipe.fileHandleForReading
+        let stderrHandle = stderrPipe.fileHandleForReading
+
+        stdoutHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty { stdoutBuf.append(data) }
+        }
+        stderrHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty { stderrBuf.append(data) }
+        }
+
         do {
             try process.run()
         } catch {
@@ -1019,11 +1034,15 @@ final class ColiASRService: @unchecked Sendable {
 
         process.waitUntilExit()
 
+        // Stop reading handlers
+        stdoutHandle.readabilityHandler = nil
+        stderrHandle.readabilityHandler = nil
+
         guard process.terminationStatus == 0 else {
             return text
         }
 
-        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let data = stdoutBuf.read()
         return String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? text
     }
