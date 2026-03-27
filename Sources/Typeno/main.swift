@@ -538,8 +538,9 @@ final class AppState: ObservableObject {
         phase = .transcribing()
 
         do {
-            let text = try await asrService.transcribe(fileURL: url)
-            transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = try await asrService.transcribe(fileURL: url)            
+            let converted = try ColiASRService.convertToTraditional(text)
+            transcript = converted.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
@@ -610,7 +611,8 @@ final class AppState: ObservableObject {
 
         do {
             let text = try await asrService.transcribe(fileURL: url)
-            transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let converted = try ColiASRService.convertToTraditional(text)
+            transcript = converted.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
@@ -918,6 +920,46 @@ final class ColiASRService: @unchecked Sendable {
 
     static var isNpmAvailable: Bool {
         findNpmPath() != nil
+    }
+
+    static func convertToTraditional(_ text: String) throws -> String {
+        let openccPaths = [
+            "/opt/homebrew/bin/opencc",   // Apple Silicon
+            "/usr/local/bin/opencc"       // Intel Mac
+        ]
+
+        guard let openccPath = openccPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            return text
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: openccPath)
+
+        process.arguments = ["-c", "s2tw.json"]
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+
+        if let data = text.data(using: .utf8) {
+            stdinPipe.fileHandleForWriting.write(data)
+        }
+        try? stdinPipe.fileHandleForWriting.close()
+
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            return text
+        }
+
+        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? text
     }
 
     /// Auto-install coli via npm. Reports progress via callback.
