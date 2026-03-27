@@ -1720,8 +1720,9 @@ final class StatusItemController: NSObject {
             submenu.addItem(emptyItem)
         } else {
             for (index, item) in items.enumerated() {
-                // Truncate text for display (max 50 chars)
-                let displayText = item.text.count > 50 ? String(item.text.prefix(50)) + "..." : item.text
+                // Replace newlines with spaces and truncate for display (max 50 chars)
+                let singleLine = item.text.replacingOccurrences(of: "\n", with: " ")
+                let displayText = singleLine.count > 50 ? String(singleLine.prefix(50)) + "..." : singleLine
                 let historyItem = NSMenuItem(title: displayText, action: #selector(copyHistoryItem(_:)), keyEquivalent: "")
                 historyItem.target = self
                 historyItem.tag = MenuTag.recentHistoryItemBase + index
