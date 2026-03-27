@@ -91,13 +91,13 @@ enum ChineseConversion: String, Codable, CaseIterable {
     var label: String {
         switch self {
         case .none:
-            return "None"
+            return L("None", "无转换")
         case .s2t:
-            return "Simplified → Traditional (s2t)"
+            return L("Simplified → Traditional (s2t)", "简体 → 繁体（标准）")
         case .s2tw:
-            return "Simplified → Traditional (s2tw)"
+            return L("Simplified → Traditional (s2tw)", "简体 → 繁体（台湾）")
         case .s2hk:
-            return "Simplified → Traditional (s2hk)"
+            return L("Simplified → Traditional (s2hk)", "简体 → 繁体（香港）")
         }
     }
 
@@ -1621,7 +1621,7 @@ final class StatusItemController: NSObject {
         menu.addItem(microphoneItem)
 
         // Chinese Conversion sub-menu
-        let conversionItem = NSMenuItem(title: "Chinese Conversion", action: nil, keyEquivalent: "")
+    let conversionItem = NSMenuItem(title: L("Chinese Conversion", "中文转换"), action: nil, keyEquivalent: "")
         let conversionSub = NSMenu()
         let currentConversion = UserDefaults.standard.chineseConversion
         for (i, option) in ChineseConversion.allCases.enumerated() {
