@@ -82,6 +82,39 @@ enum TriggerMode: String, Codable, CaseIterable {
     }
 }
 
+enum ChineseConversion: String, Codable, CaseIterable {
+    case none = "None"
+    case s2t = "s2t"
+    case s2tw = "s2tw"
+    case s2hk = "s2hk"
+
+    var label: String {
+        switch self {
+        case .none:
+            return "None"
+        case .s2t:
+            return "Simplified → Traditional (s2t)"
+        case .s2tw:
+            return "Simplified → Traditional (s2tw)"
+        case .s2hk:
+            return "Simplified → Traditional (s2hk)"
+        }
+    }
+
+    var openCCConfigFile: String? {
+        switch self {
+        case .none:
+            return nil
+        case .s2t:
+            return "s2t.json"
+        case .s2tw:
+            return "s2tw.json"
+        case .s2hk:
+            return "s2hk.json"
+        }
+    }
+}
+
 enum MicrophoneSelection: Equatable {
     case automatic
     case specific(String)
@@ -111,6 +144,7 @@ extension UserDefaults {
     private static let modifierKey   = "ai.marswave.typeno.hotkeyModifier"
     private static let triggerKey    = "ai.marswave.typeno.triggerMode"
     private static let microphoneKey = "ai.marswave.typeno.microphone"
+    private static let chineseConversionKey = "ai.marswave.typeno.chineseConversion"
 
     var hotkeyModifier: HotkeyModifier {
         get {
@@ -139,6 +173,15 @@ extension UserDefaults {
                 removeObject(forKey: Self.microphoneKey)
             }
         }
+    }
+
+    var chineseConversion: ChineseConversion {
+        get {
+            guard let raw = string(forKey: Self.chineseConversionKey),
+                  let v = ChineseConversion(rawValue: raw) else { return .none }
+            return v
+        }
+        set { set(newValue.rawValue, forKey: Self.chineseConversionKey) }
     }
 }
 
@@ -538,8 +581,11 @@ final class AppState: ObservableObject {
         phase = .transcribing()
 
         do {
-            let text = try await asrService.transcribe(fileURL: url)            
-            let converted = try ColiASRService.convertToTraditional(text)
+            let text = try await asrService.transcribe(fileURL: url)
+            let converted = try ColiASRService.convertChinese(
+                text,
+                conversion: UserDefaults.standard.chineseConversion
+            )
             transcript = converted.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
@@ -611,7 +657,10 @@ final class AppState: ObservableObject {
 
         do {
             let text = try await asrService.transcribe(fileURL: url)
-            let converted = try ColiASRService.convertToTraditional(text)
+            let converted = try ColiASRService.convertChinese(
+                text,
+                conversion: UserDefaults.standard.chineseConversion
+            )
             transcript = converted.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
@@ -922,7 +971,11 @@ final class ColiASRService: @unchecked Sendable {
         findNpmPath() != nil
     }
 
-    static func convertToTraditional(_ text: String) throws -> String {
+    static func convertChinese(_ text: String, conversion: ChineseConversion) throws -> String {
+        guard let configFile = conversion.openCCConfigFile else {
+            return text
+        }
+
         let openccPaths = [
             "/opt/homebrew/bin/opencc",   // Apple Silicon
             "/usr/local/bin/opencc"       // Intel Mac
@@ -934,8 +987,7 @@ final class ColiASRService: @unchecked Sendable {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: openccPath)
-
-        process.arguments = ["-c", "s2tw.json"]
+        process.arguments = ["-c", configFile]
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -959,7 +1011,8 @@ final class ColiASRService: @unchecked Sendable {
         }
 
         let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? text
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? text
     }
 
     /// Auto-install coli via npm. Reports progress via callback.
@@ -1506,6 +1559,7 @@ final class StatusItemController: NSObject {
         static let record = 100
         static let update = 200
         static let microphone = 250
+        static let chineseConversionBase = 275
         static let hotkeyBase = 300
         static let triggerBase = 400
     }
@@ -1560,6 +1614,20 @@ final class StatusItemController: NSObject {
         microphoneItem.tag = MenuTag.microphone
         menu.setSubmenu(makeMicrophoneSubmenu(), for: microphoneItem)
         menu.addItem(microphoneItem)
+
+        // Chinese Conversion sub-menu
+        let conversionItem = NSMenuItem(title: "Chinese Conversion", action: nil, keyEquivalent: "")
+        let conversionSub = NSMenu()
+        let currentConversion = UserDefaults.standard.chineseConversion
+        for (i, option) in ChineseConversion.allCases.enumerated() {
+            let item = NSMenuItem(title: option.label, action: #selector(changeChineseConversion(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = MenuTag.chineseConversionBase + i
+            item.state = option == currentConversion ? .on : .off
+            conversionSub.addItem(item)
+        }
+        menu.setSubmenu(conversionSub, for: conversionItem)
+        menu.addItem(conversionItem)
 
         // Hotkey sub-menu
         let hotkeyItem = NSMenuItem(title: L("Hotkey", "快捷键"), action: nil, keyEquivalent: "")
@@ -1721,6 +1789,13 @@ final class StatusItemController: NSObject {
             UserDefaults.standard.microphoneSelection = .automatic
         }
         refreshMicrophoneSubmenu()
+    }
+
+    @objc private func changeChineseConversion(_ sender: NSMenuItem) {
+        let idx = sender.tag - MenuTag.chineseConversionBase
+        guard let conversion = ChineseConversion.allCases[safe: idx] else { return }
+        UserDefaults.standard.chineseConversion = conversion
+        sender.menu?.items.forEach { $0.state = $0.tag == sender.tag ? .on : .off }
     }
 
     @objc private func changeTriggerMode(_ sender: NSMenuItem) {
