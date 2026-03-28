@@ -17,6 +17,7 @@ Special thanks to [marswave ai's coli project](https://github.com/marswaveai/col
 1. **Short-press Control** to start recording
 2. **Short-press Control** again to stop
 3. Text is automatically transcribed and pasted into your active app (also copied to clipboard)
+4. While recording, the overlay shows segmented preview text about once per second; after you stop, TypeNo still runs a final full-file transcription before pasting
 
 That's it. No windows, no settings, no accounts.
 
@@ -96,6 +97,7 @@ The app will be at `dist/TypeNo.app`. Move it to `/Applications/` for persistent
 |---|---|
 | Start/stop recording | Short-press `Control` (< 300ms, no other keys) |
 | Start/stop recording | Menu bar → Record |
+| Watch incremental transcription | Overlay updates about once per second while processing |
 | Choose microphone | Menu bar → Microphone → Automatic / specific device |
 | Transcribe a file | Drag `.m4a`/`.mp3`/`.wav`/`.aac` to the menu bar icon |
 | Check for updates | Menu bar → Check for Updates... |

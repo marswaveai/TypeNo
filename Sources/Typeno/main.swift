@@ -1,10 +1,9 @@
 import AppKit
 import ApplicationServices
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
 import Foundation
 import SwiftUI
-import UniformTypeIdentifiers
 
 // MARK: - Localization Helper
 
@@ -197,10 +196,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.openPermissionSettings(for: kind)
         }
 
-        appState.onColiInstallHelpRequest = { [weak self] in
-            self?.openColiInstallHelp()
-        }
-
         appState.onCancel = { [weak self] in
             self?.cancelFlow()
         }
@@ -316,11 +311,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PermissionManager.openPrivacySettings(for: [kind])
     }
 
-    private func openColiInstallHelp() {
-        guard let url = URL(string: "https://github.com/marswaveai/coli") else { return }
-        NSWorkspace.shared.open(url)
-    }
-
     private func performUpdate() {
         Task {
             appState.phase = .updating(L("Checking for updates...", "检查更新..."))
@@ -382,7 +372,7 @@ enum PermissionKind: CaseIterable, Hashable {
 enum AppPhase: Equatable {
     case idle
     case recording
-    case transcribing(String = "Transcribing...")
+    case transcribing(String? = nil)
     case done(String)        // transcription result, waiting for user confirm
     case permissions(Set<PermissionKind>)
     case missingColi
@@ -392,16 +382,28 @@ enum AppPhase: Equatable {
 
     var subtitle: String {
         switch self {
-        case .idle: L("Press Fn to start", "按 Fn 开始")
-        case .recording: L("Listening...", "录音中...")
+        case .idle:
+            return L("Press Fn to start", "按 Fn 开始")
+        case .recording:
+            return L("Listening...", "录音中...")
         case .transcribing(let message):
-            message == "Transcribing..." ? L("Transcribing...", "转录中...") : message
-        case .done(let text): text
-        case .permissions, .missingColi, .installingColi: ""
-        case .updating(let message): message
-        case .error(let message): message
+            let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? L("Transcribing...", "转录中...") : trimmed
+        case .done(let text):
+            return text
+        case .permissions, .missingColi, .installingColi:
+            return ""
+        case .updating(let message):
+            return message
+        case .error(let message):
+            return message
         }
     }
+}
+
+struct PreviewStreamPayload: Sendable {
+    let data: Data
+    let isFinal: Bool
 }
 
 // MARK: - App State
@@ -409,11 +411,11 @@ enum AppPhase: Equatable {
 @MainActor
 final class AppState: ObservableObject {
     @Published var phase: AppPhase = .idle
-    @Published var transcript = ""
+    var transcript = ""
+    @Published var previewTranscript = ""
 
     var onOverlayRequest: ((Bool) -> Void)?
     var onPermissionOpen: ((PermissionKind) -> Void)?
-    var onColiInstallHelpRequest: (() -> Void)?
     var onCancel: (() -> Void)?
     var onConfirm: (() -> Void)?
     var onToggleRequest: (() -> Void)?
@@ -424,6 +426,7 @@ final class AppState: ObservableObject {
     private var currentRecordingURL: URL?
     private var previousApp: NSRunningApplication?
     private var recordingTimer: Timer?
+    private var previewActive = false
     @Published var recordingElapsedSeconds: Int = 0
 
     var recordingElapsedStr: String {
@@ -434,9 +437,20 @@ final class AppState: ObservableObject {
 
     func startRecording() throws {
         transcript = ""
+        previewTranscript = ""
+        previewActive = true
         previousApp = NSWorkspace.shared.frontmostApplication
         let microphone = try MicrophoneManager.resolvedDevice(for: UserDefaults.standard.microphoneSelection)
-        currentRecordingURL = try recorder.start(using: microphone)
+        currentRecordingURL = try recorder.start(using: microphone) { [weak self] payload in
+            Task { @MainActor in
+                self?.handlePreviewAudioPayload(payload)
+            }
+        }
+        asrService.startPreviewStream { [weak self] text in
+            Task { @MainActor in
+                self?.handlePreviewTranscript(text)
+            }
+        }
         recordingElapsedSeconds = 0
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.recordingElapsedSeconds += 1 }
@@ -448,7 +462,10 @@ final class AppState: ObservableObject {
     func stopRecording() async throws {
         recordingTimer?.invalidate()
         recordingTimer = nil
-        phase = .transcribing()
+        transcript = ""
+        previewActive = false
+        asrService.finishPreviewStream()
+        phase = .transcribing(nil)
         onOverlayRequest?(true)
 
         let url = try await recorder.stop()
@@ -459,6 +476,8 @@ final class AppState: ObservableObject {
         let targetApp = previousApp
         recordingTimer?.invalidate()
         recordingTimer = nil
+        previewActive = false
+        previewTranscript = ""
         recorder.cancel()
         asrService.cancelCurrentProcess()
         if let currentRecordingURL {
@@ -535,7 +554,9 @@ final class AppState: ObservableObject {
             return
         }
 
-        phase = .transcribing()
+        transcript = ""
+        previewActive = false
+        phase = .transcribing(nil)
 
         do {
             let text = try await asrService.transcribe(fileURL: url)
@@ -593,6 +614,8 @@ final class AppState: ObservableObject {
     }
 
     private func resetState() {
+        previewActive = false
+        previewTranscript = ""
         if let currentRecordingURL {
             try? FileManager.default.removeItem(at: currentRecordingURL)
         }
@@ -603,9 +626,27 @@ final class AppState: ObservableObject {
         onOverlayRequest?(false)
     }
 
+    private func handlePreviewAudioPayload(_ payload: PreviewStreamPayload) {
+        guard previewActive else { return }
+        asrService.sendPreviewAudio(payload.data, isFinal: payload.isFinal)
+    }
+
+    private func handlePreviewTranscript(_ text: String) {
+        guard previewActive else { return }
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.isEmpty == false else { return }
+        previewTranscript = normalized
+        if case .recording = phase {
+            onOverlayRequest?(true)
+        }
+    }
+
     func transcribeFile(_ url: URL) async {
         previousApp = NSWorkspace.shared.frontmostApplication
-        phase = .transcribing()
+        transcript = ""
+        previewTranscript = ""
+        previewActive = false
+        phase = .transcribing(nil)
         onOverlayRequest?(true)
 
         do {
@@ -763,25 +804,41 @@ enum MicrophoneManager {
 // MARK: - Audio Recorder
 
 @MainActor
-final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
-    private final class RecordingContext {
+final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+    private final class RecordingContext: @unchecked Sendable {
         let session: AVCaptureSession
         let output: AVCaptureAudioFileOutput
+        let dataOutput: AVCaptureAudioDataOutput
         let recordingURL: URL
+        let streamHandler: @Sendable (PreviewStreamPayload) -> Void
+        let audioDataQueue = DispatchQueue(label: "ai.marswave.typeno.recorder.audio-data")
         var stopContinuation: CheckedContinuation<URL, Error>?
         var discardRecordingOnFinish = false
+        var converter: AVAudioConverter?
+        var sourceBuffer: AVAudioPCMBuffer?
 
-        init(session: AVCaptureSession, output: AVCaptureAudioFileOutput, recordingURL: URL) {
+        init(
+            session: AVCaptureSession,
+            output: AVCaptureAudioFileOutput,
+            dataOutput: AVCaptureAudioDataOutput,
+            recordingURL: URL,
+            streamHandler: @escaping @Sendable (PreviewStreamPayload) -> Void
+        ) {
             self.session = session
             self.output = output
+            self.dataOutput = dataOutput
             self.recordingURL = recordingURL
+            self.streamHandler = streamHandler
         }
     }
 
     private var activeContexts: [ObjectIdentifier: RecordingContext] = [:]
     private var currentRecordingID: ObjectIdentifier?
+    /// Lock-protected map for audio data delegate callbacks (called on background queue).
+    private let audioContextLock = NSLock()
+    private nonisolated(unsafe) var audioDataContexts: [ObjectIdentifier: RecordingContext] = [:]
 
-    func start(using microphone: AVCaptureDevice) throws -> URL {
+    func start(using microphone: AVCaptureDevice, streamHandler: @escaping @Sendable (PreviewStreamPayload) -> Void) throws -> URL {
         guard currentRecordingID == nil else {
             throw TypeNoError.couldNotStartRecording
         }
@@ -792,6 +849,7 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
         let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
         let session = AVCaptureSession()
         let output = AVCaptureAudioFileOutput()
+        let dataOutput = AVCaptureAudioDataOutput()
 
         do {
             session.beginConfiguration()
@@ -807,15 +865,40 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
                 throw TypeNoError.couldNotStartRecording
             }
             session.addOutput(output)
+
+            guard session.canAddOutput(dataOutput) else {
+                throw TypeNoError.couldNotStartRecording
+            }
+            session.addOutput(dataOutput)
         }
 
-        session.startRunning()
-        output.startRecording(to: url, outputFileType: .m4a, recordingDelegate: self)
+        let context = RecordingContext(
+            session: session,
+            output: output,
+            dataOutput: dataOutput,
+            recordingURL: url,
+            streamHandler: streamHandler
+        )
+        dataOutput.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsNonInterleaved: false,
+            AVLinearPCMIsBigEndianKey: false
+        ]
+        dataOutput.setSampleBufferDelegate(self, queue: context.audioDataQueue)
 
-        let context = RecordingContext(session: session, output: output, recordingURL: url)
         let contextID = ObjectIdentifier(output)
         activeContexts[contextID] = context
         currentRecordingID = contextID
+
+        let dataOutputID = ObjectIdentifier(dataOutput)
+        audioContextLock.lock()
+        audioDataContexts[dataOutputID] = context
+        audioContextLock.unlock()
+
+        session.startRunning()
+        output.startRecording(to: url, outputFileType: .m4a, recordingDelegate: self)
         return url
     }
 
@@ -830,6 +913,8 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
             currentRecordingID = nil
             return context.recordingURL
         }
+
+        context.streamHandler(PreviewStreamPayload(data: Data(), isFinal: true))
 
         return try await withCheckedThrowingContinuation { continuation in
             context.stopContinuation = continuation
@@ -848,6 +933,7 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
 
         let wasRecording = context.output.isRecording
         context.discardRecordingOnFinish = true
+        context.streamHandler(PreviewStreamPayload(data: Data(), isFinal: true))
         context.output.stopRecording()
         if !wasRecording {
             tearDownCapturePipeline(for: context)
@@ -882,7 +968,24 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
         }
     }
 
+    nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        audioContextLock.lock()
+        let context = audioDataContexts[ObjectIdentifier(output)]
+        audioContextLock.unlock()
+        if context == nil {
+            return
+        }
+        guard let context else { return }
+        guard let data = Self.makePreviewPCMData(from: sampleBuffer, context: context) else { return }
+        context.streamHandler(PreviewStreamPayload(data: data, isFinal: false))
+    }
+
     private func tearDownCapturePipeline(for context: RecordingContext) {
+        let dataOutputID = ObjectIdentifier(context.dataOutput)
+        audioContextLock.lock()
+        audioDataContexts.removeValue(forKey: dataOutputID)
+        audioContextLock.unlock()
+        context.dataOutput.setSampleBufferDelegate(nil, queue: nil)
         if context.session.isRunning {
             context.session.stopRunning()
         }
@@ -898,6 +1001,66 @@ final class AudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
         case .success(let url): stopContinuation.resume(returning: url)
         case .failure(let err): stopContinuation.resume(throwing: err)
         }
+    }
+
+    private nonisolated static func makePreviewPCMData(from sampleBuffer: CMSampleBuffer, context: RecordingContext) -> Data? {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
+            return nil
+        }
+
+        let inputFormat = AVAudioFormat(streamDescription: asbdPointer)
+        let outputFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)
+        guard let inputFormat, let outputFormat else { return nil }
+
+        if context.converter == nil || context.converter?.inputFormat != inputFormat {
+            context.converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+            context.sourceBuffer = nil
+        }
+        guard let converter = context.converter else { return nil }
+
+        let frameCapacity = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: frameCapacity) else {
+            return nil
+        }
+
+        pcmBuffer.frameLength = frameCapacity
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
+        let totalLength = CMBlockBufferGetDataLength(blockBuffer)
+        guard totalLength > 0 else { return nil }
+
+        let status = CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: totalLength, destination: pcmBuffer.mutableAudioBufferList.pointee.mBuffers.mData!)
+        guard status == kCMBlockBufferNoErr else { return nil }
+
+        let estimatedRatio = outputFormat.sampleRate / inputFormat.sampleRate
+        let outputCapacity = max(1, AVAudioFrameCount(Double(frameCapacity) * estimatedRatio) + 1024)
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputCapacity) else {
+            return nil
+        }
+
+        context.sourceBuffer = pcmBuffer
+        let inputBlock: AVAudioConverterInputBlock = { [weak context] _, outStatus in
+            guard let context, let buffer = context.sourceBuffer else {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            context.sourceBuffer = nil
+            outStatus.pointee = .haveData
+            return buffer
+        }
+
+        var error: NSError?
+        let convertStatus = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+        guard error == nil else { return nil }
+        guard convertStatus == .haveData || outputBuffer.frameLength > 0 else { return nil }
+
+        let bytesPerFrame = Int(outputFormat.streamDescription.pointee.mBytesPerFrame)
+        let byteCount = Int(outputBuffer.frameLength) * bytesPerFrame
+        guard byteCount > 0, let audioData = outputBuffer.audioBufferList.pointee.mBuffers.mData else {
+            return nil
+        }
+
+        return Data(bytes: audioData, count: byteCount)
     }
 }
 
@@ -918,6 +1081,13 @@ final class ColiASRService: @unchecked Sendable {
 
     static var isNpmAvailable: Bool {
         findNpmPath() != nil
+    }
+
+    private struct PreviewState {
+        var process: Process
+        var stdin: FileHandle
+        var lineBuffer = ""
+        var wasCancelled = false
     }
 
     /// Auto-install coli via npm. Reports progress via callback.
@@ -996,17 +1166,100 @@ final class ColiASRService: @unchecked Sendable {
     private var currentProcess: Process?
     private let processLock = NSLock()
     private var currentProcessWasCancelled = false
+    private var previewState: PreviewState?
 
     func cancelCurrentProcess() {
         processLock.lock()
         let proc = currentProcess
+        let previewProcess = previewState?.process
         if proc != nil {
             currentProcessWasCancelled = true
         }
+        if previewState != nil {
+            previewState?.wasCancelled = true
+        }
         currentProcess = nil
+        previewState = nil
         processLock.unlock()
         if let proc, proc.isRunning {
             proc.terminate()
+        }
+        if let previewProcess, previewProcess.isRunning {
+            previewProcess.terminate()
+        }
+    }
+
+    func startPreviewStream(onPreviewText: @MainActor @escaping @Sendable (String) -> Void) {
+        processLock.lock()
+        defer { processLock.unlock() }
+        guard previewState == nil else { return }
+        guard let coliPath = Self.findColiPath() else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: coliPath)
+        process.arguments = ["asr-stream", "--json", "--asr-interval-ms", "1000"]
+        process.environment = Self.makeColiEnvironment(coliPath: coliPath)
+
+        let stdin = Pipe()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        let stdoutHandle = stdout.fileHandleForReading
+        stdoutHandle.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard data.isEmpty == false else { return }
+            self?.handlePreviewStdoutData(data, onPreviewText: onPreviewText)
+        }
+
+        let stderrHandle = stderr.fileHandleForReading
+        stderrHandle.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
+
+        do {
+            try process.run()
+            previewState = PreviewState(process: process, stdin: stdin.fileHandleForWriting)
+        } catch {
+            stdoutHandle.readabilityHandler = nil
+            stderrHandle.readabilityHandler = nil
+        }
+    }
+
+    func sendPreviewAudio(_ data: Data, isFinal: Bool) {
+        processLock.lock()
+        guard let state = previewState else {
+            processLock.unlock()
+            return
+        }
+        let stdin = state.stdin
+        processLock.unlock()
+
+        if isFinal {
+            try? stdin.close()
+            return
+        }
+
+        guard data.isEmpty == false else { return }
+        try? stdin.write(contentsOf: data)
+    }
+
+    func finishPreviewStream() {
+        processLock.lock()
+        guard let state = previewState else {
+            processLock.unlock()
+            return
+        }
+        previewState = nil
+        processLock.unlock()
+        try? state.stdin.close()
+        // Wait briefly then terminate if still running
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            if state.process.isRunning {
+                state.process.terminate()
+            }
         }
     }
 
@@ -1044,40 +1297,8 @@ final class ColiASRService: @unchecked Sendable {
                     process.executableURL = URL(fileURLWithPath: coliPath)
                     process.arguments = ["asr", fileURL.path]
 
-                    // Inherit a proper PATH so node/bun/ffmpeg can be found
-                    var env = ProcessInfo.processInfo.environment
-                    let home = env["HOME"] ?? ""
-                    let coliDir = (coliPath as NSString).deletingLastPathComponent
-                    let extraPaths = [
-                        coliDir,
-                        "/opt/homebrew/bin",
-                        "/usr/local/bin",
-                        home + "/.nvm/versions/node/",  // nvm
-                        home + "/.bun/bin",
-                        home + "/.npm-global/bin",
-                        "/opt/homebrew/opt/node/bin"
-                    ]
-                    let existingPath = env["PATH"] ?? "/usr/bin:/bin"
-                    env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
-
-                    // Suppress npm update-notifier network calls — these fire on every coli
-                    // invocation and crash (unhandled rejection) when github.com is unreachable
-                    // (common in China and other restricted networks).
-                    env["NO_UPDATE_NOTIFIER"] = "1"
-                    env["npm_config_update_notifier"] = "false"
-
-                    // Inject macOS system proxy settings so Node.js fetch (undici) can reach
-                    // the internet when a system proxy is configured (e.g. via System Settings).
-                    // GUI apps don't source shell profiles, so HTTP_PROXY / HTTPS_PROXY are
-                    // typically unset even when the system proxy is active.
-                    if env["HTTP_PROXY"] == nil && env["HTTPS_PROXY"] == nil && env["http_proxy"] == nil {
-                        if let proxyURL = Self.systemHTTPSProxyURL() {
-                            env["HTTPS_PROXY"] = proxyURL
-                            env["HTTP_PROXY"] = proxyURL
-                            env["https_proxy"] = proxyURL
-                            env["http_proxy"] = proxyURL
-                        }
-                    }
+                    // Inherit a proper PATH so node/bun can be found
+                    let env = Self.makeColiEnvironment(coliPath: coliPath)
 
                     process.environment = env
 
@@ -1094,7 +1315,8 @@ final class ColiASRService: @unchecked Sendable {
 
                     stdoutHandle.readabilityHandler = { handle in
                         let data = handle.availableData
-                        if !data.isEmpty { stdoutBuf.append(data) }
+                        guard data.isEmpty == false else { return }
+                        stdoutBuf.append(data)
                     }
                     stderrHandle.readabilityHandler = { handle in
                         let data = handle.availableData
@@ -1178,6 +1400,108 @@ final class ColiASRService: @unchecked Sendable {
             return "http://\(host):\(port)"
         }
         return nil
+    }
+
+    private func handlePreviewStdoutData(_ data: Data, onPreviewText: @MainActor @escaping @Sendable (String) -> Void) {
+        guard let chunk = String(data: data, encoding: .utf8), chunk.isEmpty == false else { return }
+
+        processLock.lock()
+        guard var state = previewState else {
+            processLock.unlock()
+            return
+        }
+        state.lineBuffer += chunk
+
+        while let newlineRange = state.lineBuffer.range(of: "\n") {
+            let line = String(state.lineBuffer[..<newlineRange.lowerBound])
+            state.lineBuffer.removeSubrange(..<newlineRange.upperBound)
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { continue }
+            if let previewText = Self.extractPreviewText(from: trimmed) {
+                Task { @MainActor in
+                    onPreviewText(previewText)
+                }
+            }
+        }
+
+        previewState = state
+        processLock.unlock()
+    }
+
+    private static func extractPreviewText(from line: String) -> String? {
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) else {
+            return line.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return extractPreviewText(fromJSONObject: json) ?? line.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func extractPreviewText(fromJSONObject json: Any) -> String? {
+        if let string = json as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if let array = json as? [Any] {
+            for item in array.reversed() {
+                if let text = extractPreviewText(fromJSONObject: item) {
+                    return text
+                }
+            }
+            return nil
+        }
+
+        guard let dict = json as? [String: Any] else { return nil }
+
+        let candidateKeys = ["text", "result", "sentence", "transcript", "partial", "output"]
+        for key in candidateKeys {
+            if let value = dict[key], let text = extractPreviewText(fromJSONObject: value) {
+                return text
+            }
+        }
+
+        if let segments = dict["segments"] as? [Any] {
+            let joined = segments.compactMap { extractPreviewText(fromJSONObject: $0) }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            return joined.isEmpty ? nil : joined
+        }
+
+        for value in dict.values {
+            if let text = extractPreviewText(fromJSONObject: value) {
+                return text
+            }
+        }
+
+        return nil
+    }
+
+    private static func makeColiEnvironment(coliPath: String) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = env["HOME"] ?? ""
+        let coliDir = (coliPath as NSString).deletingLastPathComponent
+        let extraPaths = [
+            coliDir,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            home + "/.nvm/versions/node/",
+            home + "/.bun/bin",
+            home + "/.npm-global/bin",
+            "/opt/homebrew/opt/node/bin"
+        ]
+        let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+        env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+        env["NO_UPDATE_NOTIFIER"] = "1"
+        env["npm_config_update_notifier"] = "false"
+
+        if env["HTTP_PROXY"] == nil && env["HTTPS_PROXY"] == nil && env["http_proxy"] == nil {
+            if let proxyURL = systemHTTPSProxyURL() {
+                env["HTTPS_PROXY"] = proxyURL
+                env["HTTP_PROXY"] = proxyURL
+                env["https_proxy"] = proxyURL
+                env["http_proxy"] = proxyURL
+            }
+        }
+
+        return env
     }
 
     private static func detectIncompleteModelDownload() -> String? {
@@ -1664,31 +1988,17 @@ final class StatusItemController: NSObject {
         }
     }
 
-    private func makeSymbolImage(_ symbol: String) -> NSImage {
-        let size = NSSize(width: 22, height: 22)
-        let img = NSImage(size: size, flipped: false) { rect in
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 16, weight: .medium),
-                .foregroundColor: NSColor.black
-            ]
-            let str = symbol as NSString
-            let strSize = str.size(withAttributes: attrs)
-            let pt = NSPoint(
-                x: (rect.width - strSize.width) / 2,
-                y: (rect.height - strSize.height) / 2
-            )
-            str.draw(at: pt, withAttributes: attrs)
-            return true
-        }
-        img.isTemplate = true
-        return img
+    private func makeStatusBarImage(systemName: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: systemName, accessibilityDescription: "TypeNo")
+        image?.isTemplate = true
+        return image
     }
 
     private func updateTitle(for phase: AppPhase) {
         guard let button = statusItem.button else { return }
         switch phase {
         case .idle:
-            button.image = makeSymbolImage("◎")
+            button.image = makeStatusBarImage(systemName: "record.circle.fill")
             button.imagePosition = .imageOnly
             button.title = ""
         default:
@@ -1809,6 +2119,7 @@ extension StatusItemController: NSWindowDelegate, NSMenuDelegate {
 @MainActor
 final class EscapeAwarePanel: NSPanel {
     var onEscape: (() -> Void)?
+    var onReturn: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -1816,6 +2127,10 @@ final class EscapeAwarePanel: NSPanel {
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {
             onEscape?()
+            return
+        }
+        if event.keyCode == 36 || event.keyCode == 76 {  // Return or Enter
+            onReturn?()
             return
         }
         super.keyDown(with: event)
@@ -1857,6 +2172,9 @@ final class OverlayPanelController {
         capturePanel.onEscape = { [weak appState] in
             appState?.onCancel?()
         }
+        capturePanel.onReturn = { [weak appState] in
+            appState?.onConfirm?()
+        }
     }
 
     func show() {
@@ -1875,7 +2193,6 @@ final class OverlayPanelController {
             let y: CGFloat
 
             if case .permissions = appState.phase {
-                // Onboarding: top-right corner, below menu bar
                 x = frame.maxX - width - 16
                 y = frame.maxY - height - 16
             } else if case .missingColi = appState.phase {
@@ -1885,12 +2202,13 @@ final class OverlayPanelController {
                 x = frame.maxX - width - 16
                 y = frame.maxY - height - 16
             } else {
-                // Recording/transcription bar: center bottom
-                x = frame.midX - width / 2
+                // Recording/transcription bar: center bottom, fixed width
+                x = frame.midX - 360 / 2
                 y = frame.minY + 48
             }
 
-            activePanel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+            let panelFrame = NSRect(x: x, y: y, width: width, height: height)
+            activePanel.setFrame(panelFrame, display: true)
         } else {
             activePanel.setContentSize(NSSize(width: width, height: height))
         }
@@ -1945,6 +2263,18 @@ final class OverlayPanelController {
 
 // MARK: - Overlay View
 
+struct BreathingDot: View {
+    @State private var isBreathing = false
+
+    var body: some View {
+        Circle()
+            .fill(Color.white.opacity(isBreathing ? 0.7 : 0.25))
+            .frame(width: 6, height: 6)
+            .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: isBreathing)
+            .onAppear { isBreathing = true }
+    }
+}
+
 struct OverlayView: View {
     @ObservedObject var appState: AppState
 
@@ -1967,57 +2297,72 @@ struct OverlayView: View {
     }
 
     var compactView: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
+            // Left indicator
             if case .recording = appState.phase {
-                Circle()
-                    .fill(Color.primary.opacity(0.3))
-                    .frame(width: 6, height: 6)
-            }
-
-            if case .transcribing = appState.phase {
+                BreathingDot()
+            } else if case .transcribing = appState.phase {
                 ProgressView()
-                    .controlSize(.small)
-            }
-
-            if case .updating = appState.phase {
+                    .controlSize(.mini)
+            } else if case .updating = appState.phase {
                 ProgressView()
-                    .controlSize(.small)
+                    .controlSize(.mini)
             }
 
-            if case .done(let text) = appState.phase {
-                Image(systemName: "doc.on.clipboard")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            // Text content — single line
+            Group {
+                if case .done(let text) = appState.phase {
+                    Text(text)
+                        .foregroundStyle(.white)
+                } else if case .recording = appState.phase {
+                    if appState.previewTranscript.isEmpty {
+                        Text(L("Listening...", "聆听中..."))
+                            .foregroundStyle(.white.opacity(0.35))
+                    } else {
+                        Text(appState.previewTranscript)
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
+                } else if case .error = appState.phase {
+                    Text(appState.phase.subtitle)
+                        .foregroundStyle(.red.opacity(0.9))
+                } else {
+                    Text(appState.phase.subtitle)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            .font(.system(size: 14))
+            .lineLimit(1)
+            .truncationMode(.head)
 
-                Text(text)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-            } else if case .recording = appState.phase {
-                let nearLimit = appState.recordingElapsedSeconds >= 105  // 1:45
-                Text(nearLimit
-                     ? L("⚠ \(appState.recordingElapsedStr)", "⚠ \(appState.recordingElapsedStr)")
-                     : appState.recordingElapsedStr)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(nearLimit ? Color.orange : Color.primary)
-            } else {
-                Text(appState.phase.subtitle)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+
+            // Right side: timer or error dismiss
+            if case .recording = appState.phase {
+                Text(appState.recordingElapsedStr)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .fixedSize()
             }
 
             if case .error = appState.phase {
-                Button(L("OK", "好")) {
+                Button {
                     appState.onCancel?()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.5))
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 12))
+                .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .frame(width: 360)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(white: 0.15))
+        )
+        .shadow(color: .black.opacity(0.3), radius: 12, y: 4)
     }
 
     func permissionView(missing: Set<PermissionKind>) -> some View {

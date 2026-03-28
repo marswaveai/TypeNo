@@ -1,5 +1,14 @@
 # Change log
 
+## v1.4.0 — 2026-03-28
+- **Streaming live preview**: while recording, TypeNo feeds live microphone PCM into `coli asr-stream` for about-once-per-second overlay text preview. Final paste still uses full-file `coli asr` pass.
+- **New overlay design**: dark solid background (not translucent), fixed 360pt width, rounded rectangle, breathing dot indicator. Replaces old capsule-shaped overlay.
+- **Bug fix**: second recording now correctly gets streaming preview (fixed `previewState` cleanup in `finishPreviewStream`).
+- **Bug fix**: overlay position no longer jumps between phases (fixed center positioning for compactView).
+- **Bug fix**: Swift concurrency errors in `captureOutput` audio data delegate (actor isolation fix with lock-protected dictionary).
+- **Code cleanup**: removed 2 unused imports, 3 dead methods, 5 dead properties, 1 dead callback. Reduced unnecessary `@Published` usage.
+- **Docs synced**: updated README (EN/CN/JP) to describe streaming preview feature.
+
 ## v1.3.1 — 2026-03-27
 - **Better error messages**: detect and surface actionable fixes for three common setup failures:
   - Missing `ffmpeg` → prompt `brew install ffmpeg` instead of spinning until timeout
