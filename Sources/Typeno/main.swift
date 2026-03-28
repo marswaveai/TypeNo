@@ -524,6 +524,13 @@ final class AppState: ObservableObject {
                 }
                 // Verify installation
                 if ColiASRService.isInstalled {
+                    phase = .installingColi(
+                        L(
+                            "Coli installed. The first transcription will download the speech model.",
+                            "Coli 已安装。首次转录时会下载语音模型。"
+                        )
+                    )
+                    try? await Task.sleep(for: .seconds(1.5))
                     phase = .idle
                     onOverlayRequest?(false)
                 } else {
@@ -1518,7 +1525,7 @@ final class ColiASRService: @unchecked Sendable {
 
         let fm = FileManager.default
         if !fm.fileExists(atPath: senseVoiceCheckFile.path) && fm.fileExists(atPath: senseVoiceArchive.path) {
-            return "Coli model download looks incomplete. Delete \(senseVoiceArchive.path) and try again."
+            return "Coli's first model download looks incomplete in ~/.coli/models. Delete the partial archive and try transcribing again."
         }
 
         return nil
@@ -1547,7 +1554,7 @@ final class ColiASRService: @unchecked Sendable {
             .joined(separator: "\n")
 
         if combined.isEmpty {
-            return "Transcription timed out. Coli may still be downloading its first model, or the network/proxy may be blocking GitHub."
+            return "Transcription timed out. Coli downloads its first model on first use into ~/.coli/models. If GitHub is blocked, enable TUN/Enhanced proxy mode and try again."
         }
 
         let lower = combined.lowercased()
@@ -2310,6 +2317,11 @@ struct OverlayView: View {
             }
 
             // Text content — single line
+            let isError = {
+                if case .error = appState.phase { return true }
+                return false
+            }()
+
             Group {
                 if case .done(let text) = appState.phase {
                     Text(text)
@@ -2330,9 +2342,9 @@ struct OverlayView: View {
                         .foregroundStyle(.white.opacity(0.7))
                 }
             }
-            .font(.system(size: 14))
-            .lineLimit(1)
-            .truncationMode(.head)
+            .font(.system(size: isError ? 12 : 14))
+            .lineLimit(isError ? 3 : 1)
+            .truncationMode(isError ? .tail : .head)
 
             Spacer(minLength: 0)
 
@@ -2357,7 +2369,7 @@ struct OverlayView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .frame(width: 360)
+        .frame(width: isError ? 420 : 360)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color(white: 0.15))
