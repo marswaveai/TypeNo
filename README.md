@@ -45,6 +45,8 @@ TypeNo uses [coli](https://github.com/marswaveai/coli) for local speech recognit
 npm install -g @marswave/coli
 ```
 
+This installs the `coli` CLI itself, but it does not pre-download the speech model.
+
 If Coli is missing, TypeNo will show an in-app setup prompt with the install command.
 
 > **Node 24+:** If you get a `sherpa-onnx-node` error, build from source:
@@ -60,14 +62,18 @@ TypeNo needs two one-time permissions:
 
 The app will guide you through granting these on first launch.
 
+On the first actual transcription, `coli` will also download its speech model into `~/.coli/models/`. That is a separate step from `npm install -g @marswave/coli`.
+
 ### Troubleshooting: Coli Model Download Fails
 
-The speech model is downloaded from GitHub. If GitHub is inaccessible in your network, the download will fail.
+The speech model is downloaded from GitHub. If GitHub is inaccessible in your network, the first transcription can fail while `coli` is downloading the model.
 
-**Fix:** Enable **TUN mode** (also called Enhanced Mode) in your proxy tool to ensure all system-level traffic is routed correctly. Then retry the install:
+**Fix:** Enable **TUN mode** (also called Enhanced Mode) in your proxy tool to ensure all system-level traffic is routed correctly. Then trigger another transcription so `coli` can retry the model download.
+
+If `~/.coli/models/` contains a partial `.tar.bz2` archive from a failed download, delete the leftover files in that directory before retrying.
 
 ```bash
-npm install -g @marswave/coli
+rm -rf ~/.coli/models
 ```
 
 ### Troubleshooting: Accessibility Permission Not Working
