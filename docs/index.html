@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TypeNo — Voice to text, instantly.</title>
+<meta name="description" content="A free, open-source, privacy-first voice input tool for macOS. Press Control, speak, and text appears.">
+<meta property="og:title" content="TypeNo — Voice to text, instantly.">
+<meta property="og:description" content="A free, open-source, privacy-first voice input tool for macOS.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://typeno.com">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⌨</text></svg>">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --orange:#FF6B00;
+  --orange-light:#FF8C38;
+  --bg:#000;
+  --surface:rgba(255,255,255,0.04);
+  --border:rgba(255,255,255,0.08);
+  --text:#fff;
+  --text-secondary:rgba(255,255,255,0.55);
+  --radius:12px;
+}
+html{scroll-behavior:smooth}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',system-ui,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* Nav */
+nav{
+  position:fixed;top:0;left:0;right:0;z-index:100;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px clamp(24px,5vw,80px);
+  background:rgba(0,0,0,0.8);
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
+  border-bottom:1px solid var(--border);
+}
+.nav-logo{
+  font-size:18px;font-weight:700;letter-spacing:-0.02em;
+  color:var(--text);text-decoration:none;
+}
+.nav-logo span{color:var(--orange)}
+.nav-links{display:flex;align-items:center;gap:24px}
+.nav-links a{
+  font-size:14px;color:var(--text-secondary);text-decoration:none;
+  transition:color 0.2s;
+}
+.nav-links a:hover{color:var(--text)}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:10px 20px;border-radius:8px;
+  font-size:14px;font-weight:600;text-decoration:none;
+  transition:all 0.2s;cursor:pointer;border:none;
+}
+.btn-primary{
+  background:linear-gradient(135deg,var(--orange),var(--orange-light));
+  color:#fff;
+}
+.btn-primary:hover{filter:brightness(1.1);transform:translateY(-1px)}
+.btn-outline{
+  background:transparent;
+  border:1px solid var(--border);
+  color:var(--text);
+}
+.btn-outline:hover{border-color:rgba(255,255,255,0.25);background:var(--surface)}
+
+/* Hero */
+.hero{
+  min-height:100vh;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;
+  padding:120px clamp(24px,5vw,80px) 80px;
+  position:relative;overflow:hidden;
+}
+.hero::before{
+  content:'';position:absolute;
+  width:600px;height:600px;
+  background:radial-gradient(circle,rgba(255,107,0,0.08) 0%,transparent 70%);
+  top:50%;left:50%;transform:translate(-50%,-50%);
+  pointer-events:none;
+}
+.hero h1{
+  font-size:clamp(56px,10vw,120px);
+  font-weight:800;
+  letter-spacing:-0.04em;
+  line-height:1.0;
+  margin-bottom:24px;
+  position:relative;
+}
+.hero h1 .accent{
+  background:linear-gradient(135deg,var(--orange),var(--orange-light));
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+.hero p.subtitle{
+  font-size:clamp(16px,2vw,20px);
+  color:var(--text-secondary);
+  max-width:520px;
+  margin-bottom:40px;
+  line-height:1.6;
+}
+.hero-buttons{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
+.hero .btn{padding:14px 28px;font-size:16px;border-radius:10px}
+
+/* Badge */
+.badge{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:6px 14px;border-radius:20px;
+  background:var(--surface);border:1px solid var(--border);
+  font-size:13px;color:var(--text-secondary);
+  margin-bottom:32px;
+}
+.badge .dot{width:6px;height:6px;border-radius:50%;background:var(--orange)}
+
+/* Sections */
+section{padding:100px clamp(24px,5vw,80px)}
+.section-label{
+  font-size:13px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;
+  color:var(--orange);margin-bottom:12px;
+}
+.section-title{
+  font-size:clamp(32px,5vw,48px);
+  font-weight:700;letter-spacing:-0.03em;
+  margin-bottom:60px;
+}
+
+/* Steps */
+.steps{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:32px;max-width:960px;margin:0 auto;
+}
+.step{
+  padding:32px;border-radius:var(--radius);
+  background:var(--surface);border:1px solid var(--border);
+  text-align:center;
+}
+.step-number{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:40px;height:40px;border-radius:10px;
+  background:linear-gradient(135deg,var(--orange),var(--orange-light));
+  color:#fff;font-weight:700;font-size:16px;
+  margin-bottom:16px;
+}
+.step h3{font-size:18px;font-weight:600;margin-bottom:8px}
+.step p{font-size:14px;color:var(--text-secondary);line-height:1.6}
+
+/* Features */
+.features{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:24px;max-width:960px;margin:0 auto;
+}
+.feature{
+  padding:32px;border-radius:var(--radius);
+  background:var(--surface);border:1px solid var(--border);
+  transition:border-color 0.2s;
+}
+.feature:hover{border-color:rgba(255,107,0,0.2)}
+.feature-icon{
+  font-size:28px;margin-bottom:16px;
+  display:block;
+}
+.feature h3{font-size:18px;font-weight:600;margin-bottom:8px}
+.feature p{font-size:14px;color:var(--text-secondary);line-height:1.7}
+
+/* Footer */
+footer{
+  text-align:center;
+  padding:48px 24px;
+  border-top:1px solid var(--border);
+  color:var(--text-secondary);font-size:13px;
+}
+footer a{color:var(--text-secondary);text-decoration:none}
+footer a:hover{color:var(--text)}
+footer .footer-links{display:flex;gap:24px;justify-content:center;margin-bottom:12px}
+
+/* Responsive */
+@media(max-width:640px){
+  .nav-links a:not(.btn){display:none}
+  .hero-buttons{flex-direction:column;align-items:stretch}
+  .hero .btn{justify-content:center}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo">Type<span>No</span></a>
+  <div class="nav-links">
+    <a href="https://github.com/marswaveai/TypeNo">GitHub</a>
+    <a href="https://github.com/marswaveai/TypeNo/releases/latest" class="btn btn-primary">Download</a>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="badge">
+    <span class="dot"></span>
+    v1.4.0 — Now with live streaming preview
+  </div>
+  <h1>Type? <span class="accent">No.</span></h1>
+  <p class="subtitle">The best way to type is not to type at all. Press a key, speak, and text appears — locally, privately, instantly.</p>
+  <div class="hero-buttons">
+    <a href="https://github.com/marswaveai/TypeNo/releases/latest" class="btn btn-primary">
+      <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download for macOS
+    </a>
+    <a href="https://github.com/marswaveai/TypeNo" class="btn btn-outline">View on GitHub</a>
+  </div>
+</section>
+
+<section id="how">
+  <div style="text-align:center">
+    <div class="section-label">How it works</div>
+    <h2 class="section-title">Three steps. Nothing else.</h2>
+  </div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-number">1</div>
+      <h3>Press Control</h3>
+      <p>A short press on the Control key starts recording. A floating bar appears at the bottom of your screen.</p>
+    </div>
+    <div class="step">
+      <div class="step-number">2</div>
+      <h3>Speak</h3>
+      <p>Say whatever you want. Live preview text appears as you speak, updating about once per second.</p>
+    </div>
+    <div class="step">
+      <div class="step-number">3</div>
+      <h3>Text appears</h3>
+      <p>Press Control again. Your speech is transcribed and pasted right where your cursor was. Done.</p>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div style="text-align:center">
+    <div class="section-label">Why TypeNo</div>
+    <h2 class="section-title">Built different.</h2>
+  </div>
+  <div class="features">
+    <div class="feature">
+      <span class="feature-icon">🔒</span>
+      <h3>Local &amp; Private</h3>
+      <p>All speech recognition runs on your Mac. No cloud, no accounts, no data ever leaves your device. Not even a network request.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">⚡</span>
+      <h3>Lightning Fast</h3>
+      <p>Voice to text in under a second. Live streaming preview while you speak. No waiting, no loading screens.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">🔓</span>
+      <h3>Open Source</h3>
+      <p>Free forever. GPLv3 licensed. Inspect every line of code. Built by <a href="https://github.com/marswaveai" style="color:var(--orange);text-decoration:none">marswave</a>.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-links">
+    <a href="https://github.com/marswaveai/TypeNo">GitHub</a>
+    <a href="https://github.com/marswaveai/TypeNo/releases">Releases</a>
+    <a href="https://github.com/marswaveai/TypeNo/blob/main/LICENSE">GPLv3</a>
+  </div>
+  <p>Made by <a href="https://github.com/marswaveai">marswave</a></p>
+</footer>
+
+</body>
+</html>
