@@ -5,26 +5,26 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>TypeNo</string>
+	<string>TypeNoAgent</string>
 	<key>CFBundleIdentifier</key>
-	<string>ai.marswave.typeno</string>
+	<string>ai.marswave.typeno.agent</string>
 	<key>CFBundleIconFile</key>
 	<string>TypeNo</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>TypeNo</string>
+	<string>TypeNo Agent</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.6</string>
+	<string>1.2.6</string>
 	<key>CFBundleVersion</key>
-	<string>10006</string>
+	<string>10206</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>TypeNo needs microphone access to capture your voice for transcription.</string>
+	<string>TypeNo Agent needs microphone access to capture your voice for transcription.</string>
 </dict>
 </plist>

@@ -3,9 +3,138 @@ import ApplicationServices
 import AVFoundation
 import Combine
 import Foundation
+import Security
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - Localization Helper
+
+/// Returns `zh` when the system's first preferred language is Chinese, otherwise `en`.
+func L(_ en: String, _ zh: String) -> String {
+    Locale.preferredLanguages.first.map { $0.hasPrefix("zh") } == true ? zh : en
+}
+
+// MARK: - Hotkey Configuration
+
+enum HotkeyModifier: String, Codable, CaseIterable {
+    case leftControl  = "LeftControl"
+    case rightControl = "RightControl"
+    case leftOption   = "LeftOption"
+    case rightOption  = "RightOption"
+    case leftCommand  = "LeftCommand"
+    case rightCommand = "RightCommand"
+    case leftShift    = "LeftShift"
+    case rightShift   = "RightShift"
+
+    var symbol: String {
+        switch self {
+        case .leftControl,  .rightControl: "⌃"
+        case .leftOption,   .rightOption:  "⌥"
+        case .leftCommand,  .rightCommand: "⌘"
+        case .leftShift,    .rightShift:   "⇧"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .leftControl:  L("⌃ Left Control",  "⌃ 左 Control")
+        case .rightControl: L("⌃ Right Control", "⌃ 右 Control")
+        case .leftOption:   L("⌥ Left Option",   "⌥ 左 Option")
+        case .rightOption:  L("⌥ Right Option",  "⌥ 右 Option")
+        case .leftCommand:  L("⌘ Left Command",  "⌘ 左 Command")
+        case .rightCommand: L("⌘ Right Command", "⌘ 右 Command")
+        case .leftShift:    L("⇧ Left Shift",    "⇧ 左 Shift")
+        case .rightShift:   L("⇧ Right Shift",   "⇧ 右 Shift")
+        }
+    }
+
+    var flag: NSEvent.ModifierFlags {
+        switch self {
+        case .leftControl,  .rightControl: .control
+        case .leftOption,   .rightOption:  .option
+        case .leftCommand,  .rightCommand: .command
+        case .leftShift,    .rightShift:   .shift
+        }
+    }
+
+    var keyCode: UInt16 {
+        switch self {
+        case .leftControl:  59
+        case .rightControl: 62
+        case .leftOption:   58
+        case .rightOption:  61
+        case .leftCommand:  55
+        case .rightCommand: 54
+        case .leftShift:    56
+        case .rightShift:   60
+        }
+    }
+}
+
+enum TriggerMode: String, Codable, CaseIterable {
+    case singleTap = "SingleTap"
+    case doubleTap = "DoubleTap"
+
+    var label: String {
+        switch self {
+        case .singleTap: L("1× Single Tap", "1× 单击")
+        case .doubleTap: L("2× Double Tap", "2× 双击")
+        }
+    }
+}
+
+extension UserDefaults {
+    private static let modifierKey   = "ai.marswave.typeno.hotkeyModifier"
+    private static let llmModifierKey = "ai.marswave.typeno.llmHotkeyModifier"
+    private static let formalModifierKey = "ai.marswave.typeno.formalHotkeyModifier"
+    private static let triggerKey    = "ai.marswave.typeno.triggerMode"
+
+    var hotkeyModifier: HotkeyModifier {
+        get {
+            guard let raw = string(forKey: Self.modifierKey),
+                  let v = HotkeyModifier(rawValue: raw) else { return .leftOption }
+            return v
+        }
+        set { set(newValue.rawValue, forKey: Self.modifierKey) }
+    }
+
+    var llmHotkeyModifier: HotkeyModifier {
+        get {
+            guard let raw = string(forKey: Self.llmModifierKey),
+                  let v = HotkeyModifier(rawValue: raw) else { return .rightControl }
+            return v
+        }
+        set { set(newValue.rawValue, forKey: Self.llmModifierKey) }
+    }
+
+    var formalHotkeyModifier: HotkeyModifier {
+        get {
+            guard let raw = string(forKey: Self.formalModifierKey),
+                  let v = HotkeyModifier(rawValue: raw) else { return .leftControl }
+            return v
+        }
+        set { set(newValue.rawValue, forKey: Self.formalModifierKey) }
+    }
+
+    var triggerMode: TriggerMode {
+        get {
+            guard let raw = string(forKey: Self.triggerKey),
+                  let v = TriggerMode(rawValue: raw) else { return .singleTap }
+            return v
+        }
+        set { set(newValue.rawValue, forKey: Self.triggerKey) }
+    }
+}
+
+extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+extension Notification.Name {
+    static let hotkeyConfigChanged = Notification.Name("ai.marswave.typeno.hotkeyConfigChanged")
+}
 
 
 @MainActor
@@ -13,6 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     private var statusItemController: StatusItemController?
     private var hotkeyMonitor: HotkeyMonitor?
+    private var llmHotkeyMonitor: HotkeyMonitor?
+    private var formalHotkeyMonitor: HotkeyMonitor?
     private var overlayController: OverlayPanelController?
     private var permissionsGranted = false
     private var pollTimer: Timer?
@@ -23,9 +154,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         overlayController = OverlayPanelController(appState: appState)
         statusItemController = StatusItemController(appState: appState)
-        hotkeyMonitor = HotkeyMonitor(onToggle: { [weak self] in
-            self?.handleToggle()
-        })
+        hotkeyMonitor = HotkeyMonitor(
+            modifier: UserDefaults.standard.hotkeyModifier,
+            triggerMode: UserDefaults.standard.triggerMode,
+            onToggle: { [weak self] in self?.handleToggle() }
+        )
+        llmHotkeyMonitor = HotkeyMonitor(
+            modifier: UserDefaults.standard.llmHotkeyModifier,
+            triggerMode: .singleTap,
+            onToggle: { [weak self] in self?.handleLLMToggle() }
+        )
+        formalHotkeyMonitor = HotkeyMonitor(
+            modifier: UserDefaults.standard.formalHotkeyModifier,
+            triggerMode: .singleTap,
+            onToggle: { [weak self] in self?.handleFormalToggle() }
+        )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(restartHotkeyMonitor),
+            name: .hotkeyConfigChanged,
+            object: nil
+        )
 
         appState.onToggleRequest = { [weak self] in
             self?.handleToggle()
@@ -67,6 +217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hotkeyMonitor?.start()
+        llmHotkeyMonitor?.start()
+        formalHotkeyMonitor?.start()
 
         // Silent update check on launch
         Task {
@@ -113,7 +265,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startRecording() {
+    @objc private func restartHotkeyMonitor() {
+        hotkeyMonitor?.stop()
+        llmHotkeyMonitor?.stop()
+        formalHotkeyMonitor?.stop()
+        hotkeyMonitor = HotkeyMonitor(
+            modifier: UserDefaults.standard.hotkeyModifier,
+            triggerMode: UserDefaults.standard.triggerMode,
+            onToggle: { [weak self] in self?.handleToggle() }
+        )
+        llmHotkeyMonitor = HotkeyMonitor(
+            modifier: UserDefaults.standard.llmHotkeyModifier,
+            triggerMode: .singleTap,
+            onToggle: { [weak self] in self?.handleLLMToggle() }
+        )
+        formalHotkeyMonitor = HotkeyMonitor(
+            modifier: UserDefaults.standard.formalHotkeyModifier,
+            triggerMode: .singleTap,
+            onToggle: { [weak self] in self?.handleFormalToggle() }
+        )
+        hotkeyMonitor?.start()
+        llmHotkeyMonitor?.start()
+        formalHotkeyMonitor?.start()
+    }
+
+    private func handleLLMToggle() {
+        switch appState.phase {
+        case .idle:
+            startRecording(mode: .llmAgent)
+        case .recording:
+            stopRecording()
+        case .done:
+            appState.confirmInsert()
+        case .transcribing, .error:
+            appState.cancel()
+        case .permissions, .missingColi, .installingColi, .updating:
+            break
+        }
+    }
+
+    private func handleFormalToggle() {
+        switch appState.phase {
+        case .idle:
+            startRecording(mode: .spokenCleanup)
+        case .recording:
+            stopRecording()
+        case .done:
+            appState.confirmInsert()
+        case .transcribing, .error:
+            appState.cancel()
+        case .permissions, .missingColi, .installingColi, .updating:
+            break
+        }
+    }
+
+    private func startRecording(mode: OutputMode? = nil) {
         // Only check permissions if not previously granted this session
         if !permissionsGranted {
             let missing = PermissionManager.missingPermissions(requestMicrophoneIfNeeded: true, requestAccessibilityIfNeeded: true)
@@ -125,7 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
-            try appState.startRecording()
+            try appState.startRecording(mode: mode)
         } catch {
             appState.showError(error.localizedDescription)
         }
@@ -159,23 +365,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func performUpdate() {
         Task {
-            appState.phase = .updating("Checking for updates...")
+            appState.phase = .updating(L("Checking for updates...", "检查更新..."))
             appState.onOverlayRequest?(true)
 
-            guard let release = await updateService.checkForUpdate() else {
+            switch await updateService.checkForUpdateDetailed() {
+            case .upToDate:
+                appState.phase = .updating(L("Already up to date", "已是最新版本"))
+                try? await Task.sleep(for: .seconds(2))
                 appState.phase = .idle
                 appState.onOverlayRequest?(false)
-                // Show brief "up to date" message
-                appState.showError("Already up to date")
-                return
-            }
 
-            do {
-                try await updateService.downloadAndInstall(from: release.downloadURL) { message in
-                    self.appState.phase = .updating(message)
-                }
-            } catch {
-                appState.showError("Update failed: \(error.localizedDescription)")
+            case .rateLimited:
+                appState.showError(L("GitHub rate limit — try again later", "GitHub 请求限制，请稍后重试"))
+
+            case .failed:
+                appState.showError(L("Could not check for updates", "无法检查更新"))
+
+            case .updateAvailable(let release):
+                appState.phase = .updating(
+                    L(
+                        "Upstream TypeNo v\(release.version) available",
+                        "上游 TypeNo v\(release.version) 可参考"
+                    )
+                )
+                appState.onOverlayRequest?(true)
+                try? await Task.sleep(for: .seconds(1.5))
+                appState.phase = .idle
+                appState.onOverlayRequest?(false)
+                NSWorkspace.shared.open(release.releaseURL)
             }
         }
     }
@@ -189,15 +406,15 @@ enum PermissionKind: CaseIterable, Hashable {
 
     var title: String {
         switch self {
-        case .microphone: "Microphone"
-        case .accessibility: "Accessibility"
+        case .microphone: L("Microphone", "麦克风")
+        case .accessibility: L("Accessibility", "辅助功能")
         }
     }
 
     var explanation: String {
         switch self {
-        case .microphone: "Required to capture your voice"
-        case .accessibility: "Required to type text into apps"
+        case .microphone: L("Required to capture your voice", "用于捕获语音")
+        case .accessibility: L("Required to type text into apps", "用于向应用输入文字")
         }
     }
 
@@ -205,6 +422,60 @@ enum PermissionKind: CaseIterable, Hashable {
         switch self {
         case .microphone: "mic.fill"
         case .accessibility: "hand.raised.fill"
+        }
+    }
+}
+
+enum OutputMode: String {
+    case raw
+    case llmAgent
+    case spokenCleanup
+    case zhEnMixed
+    case animeChuunibyou
+    case oldInternetMeme
+    case movieQuoteStyle
+    case philoSocJargon
+    case sarcasticSnark
+
+    var menuTitle: String {
+        switch self {
+        case .raw: L("Raw", "普通")
+        case .llmAgent: "Agent"
+        case .spokenCleanup: L("Cleanup", "口语整理")
+        case .zhEnMixed: L("Zh-En Mix", "中英夹杂")
+        case .animeChuunibyou: L("Anime Chuunibyou", "日漫中二")
+        case .oldInternetMeme: L("Old Web Meme", "网络热梗")
+        case .movieQuoteStyle: L("Movie Quote Style", "电影台词风")
+        case .philoSocJargon: L("Philo-Soc Jargon", "哲学社会学黑话")
+        case .sarcasticSnark: L("Sarcastic Snark", "阴阳吐槽")
+        }
+    }
+}
+
+enum LLMProvider: String, CaseIterable {
+    case qwen
+    case kimi
+
+    var displayName: String {
+        switch self {
+        case .qwen: "Qwen"
+        case .kimi: "Kimi"
+        }
+    }
+
+    var baseURL: URL {
+        switch self {
+        case .qwen:
+            URL(string: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")!
+        case .kimi:
+            URL(string: "https://api.moonshot.cn/v1/chat/completions")!
+        }
+    }
+
+    var defaultModel: String {
+        switch self {
+        case .qwen: "qwen-plus"
+        case .kimi: "moonshot-v1-8k"
         }
     }
 }
@@ -222,9 +493,10 @@ enum AppPhase: Equatable {
 
     var subtitle: String {
         switch self {
-        case .idle: "Press Fn to start"
-        case .recording: "Listening..."
-        case .transcribing(let message): message
+        case .idle: L("Press hotkey to start", "按快捷键开始")
+        case .recording: L("Listening...", "录音中...")
+        case .transcribing(let message):
+            message == "Transcribing..." ? L("Transcribing...", "转录中...") : message
         case .done(let text): text
         case .permissions, .missingColi, .installingColi: ""
         case .updating(let message): message
@@ -239,6 +511,8 @@ enum AppPhase: Equatable {
 final class AppState: ObservableObject {
     @Published var phase: AppPhase = .idle
     @Published var transcript = ""
+    @Published var outputMode: OutputMode = .raw
+    @Published var llmProvider: LLMProvider = .kimi
 
     var onOverlayRequest: ((Bool) -> Void)?
     var onPermissionOpen: ((PermissionKind) -> Void)?
@@ -250,18 +524,35 @@ final class AppState: ObservableObject {
 
     private let recorder = AudioRecorder()
     private let asrService = ColiASRService()
+    private let llmService = CompatibleLLMAgentService()
     private var currentRecordingURL: URL?
     private var previousApp: NSRunningApplication?
+    private var activeOutputMode: OutputMode = .raw
+    private var recordingTimer: Timer?
+    @Published var recordingElapsedSeconds: Int = 0
 
-    func startRecording() throws {
+    var recordingElapsedStr: String {
+        let m = recordingElapsedSeconds / 60
+        let s = recordingElapsedSeconds % 60
+        return String(format: "%d:%02d", m, s)
+    }
+
+    func startRecording(mode: OutputMode? = nil) throws {
         transcript = ""
         previousApp = NSWorkspace.shared.frontmostApplication
+        activeOutputMode = mode ?? outputMode
         currentRecordingURL = try recorder.start()
+        recordingElapsedSeconds = 0
+        recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.recordingElapsedSeconds += 1 }
+        }
         phase = .recording
         onOverlayRequest?(true)
     }
 
     func stopRecording() async throws {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
         phase = .transcribing()
         onOverlayRequest?(true)
 
@@ -270,12 +561,15 @@ final class AppState: ObservableObject {
     }
 
     func cancel() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
         recorder.cancel()
         asrService.cancelCurrentProcess()
         if let currentRecordingURL {
             try? FileManager.default.removeItem(at: currentRecordingURL)
         }
         currentRecordingURL = nil
+        activeOutputMode = outputMode
         transcript = ""
         phase = .idle
         onOverlayRequest?(false)
@@ -302,7 +596,7 @@ final class AppState: ObservableObject {
     }
 
     func autoInstallColi() {
-        phase = .installingColi("Installing coli...")
+        phase = .installingColi(L("Installing coli...", "安装中..."))
         onOverlayRequest?(true)
 
         Task {
@@ -319,7 +613,7 @@ final class AppState: ObservableObject {
                     phase = .missingColi
                 }
             } catch {
-                showError("Install failed: \(error.localizedDescription)")
+                showError(L("Install failed: \(error.localizedDescription)", "安装失败：\(error.localizedDescription)"))
             }
         }
     }
@@ -338,32 +632,23 @@ final class AppState: ObservableObject {
 
     func transcribeAndInsert() async {
         guard let url = currentRecordingURL else {
-            showError("No recording")
+            showError(L("No recording", "没有录音"))
             return
         }
 
         phase = .transcribing()
 
-        // Progress timer: show elapsed time and warn near timeout
-        let startTime = Date()
-        let progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                let elapsed = Int(Date().timeIntervalSince(startTime))
-                if elapsed >= 100 {
-                    self?.phase = .transcribing("Almost timeout... (\(elapsed)s)")
-                } else if elapsed >= 10 {
-                    self?.phase = .transcribing("Transcribing... \(elapsed)s")
-                }
-            }
-        }
-
         do {
             let text = try await asrService.transcribe(fileURL: url)
-            progressTimer.invalidate()
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
+            }
+
+            if activeOutputMode != .raw {
+                phase = .transcribing(rewriteStatusText(for: activeOutputMode))
+                transcript = try await llmService.rewrite(transcript, provider: llmProvider, mode: activeOutputMode)
             }
 
             // Show result briefly, then auto-insert
@@ -371,10 +656,8 @@ final class AppState: ObservableObject {
             onOverlayRequest?(true)
             confirmInsert()
         } catch TypeNoError.coliNotInstalled {
-            progressTimer.invalidate()
             showMissingColi()
         } catch {
-            progressTimer.invalidate()
             showError(error.localizedDescription)
         }
     }
@@ -424,42 +707,357 @@ final class AppState: ObservableObject {
         onOverlayRequest?(false)
     }
 
-    func transcribeFile(_ url: URL) async {
+    func transcribeFile(_ url: URL, mode: OutputMode? = nil) async {
         previousApp = NSWorkspace.shared.frontmostApplication
+        activeOutputMode = mode ?? outputMode
         phase = .transcribing()
         onOverlayRequest?(true)
 
-        let startTime = Date()
-        let progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                let elapsed = Int(Date().timeIntervalSince(startTime))
-                if elapsed >= 100 {
-                    self?.phase = .transcribing("Almost timeout... (\(elapsed)s)")
-                } else if elapsed >= 10 {
-                    self?.phase = .transcribing("Transcribing... \(elapsed)s")
-                }
-            }
-        }
-
         do {
             let text = try await asrService.transcribe(fileURL: url)
-            progressTimer.invalidate()
             transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard transcript.isEmpty == false else {
                 throw TypeNoError.emptyTranscript
             }
 
+            if activeOutputMode != .raw {
+                phase = .transcribing(rewriteStatusText(for: activeOutputMode))
+                transcript = try await llmService.rewrite(transcript, provider: llmProvider, mode: activeOutputMode)
+            }
+
             phase = .done(transcript)
             onOverlayRequest?(true)
-            confirmInsert()
+            // Copy to clipboard (don't paste into another app)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(transcript, forType: .string)
+            try? await Task.sleep(for: .seconds(2))
+            cancel()
         } catch TypeNoError.coliNotInstalled {
-            progressTimer.invalidate()
             showMissingColi()
         } catch {
-            progressTimer.invalidate()
             showError(error.localizedDescription)
         }
+    }
+
+    private func rewriteStatusText(for mode: OutputMode) -> String {
+        switch mode {
+        case .raw:
+            return L("Transcribing...", "转录中...")
+        case .llmAgent:
+            return L("Rewriting as agent prompt with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 生成 Agent 提示词...")
+        case .spokenCleanup:
+            return L("Cleaning up spoken language with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 整理口语表达...")
+        case .zhEnMixed:
+            return L("Rewriting into mixed Chinese-English style with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 转成中英夹杂风格...")
+        case .animeChuunibyou:
+            return L("Rewriting into anime chuunibyou style with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 转成日漫中二风...")
+        case .oldInternetMeme:
+            return L("Rewriting into old web meme style with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 转成网络热梗风...")
+        case .movieQuoteStyle:
+            return L("Rewriting into movie quote style with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 转成电影台词风...")
+        case .philoSocJargon:
+            return L("Rewriting into philosophy-social-theory jargon with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 转成哲学社会学黑话...")
+        case .sarcasticSnark:
+            return L("Rewriting into sarcastic snark with \(llmProvider.displayName)...", "用 \(llmProvider.displayName) 转成阴阳吐槽风...")
+        }
+    }
+}
+
+enum ProviderKeychain {
+    private static let service = "ai.marswave.typeno.agent"
+
+    static func configuredKey(for provider: LLMProvider) -> String? {
+        let envKeyName = provider == .qwen ? "DASHSCOPE_API_KEY" : "MOONSHOT_API_KEY"
+        if let envKey = ProcessInfo.processInfo.environment[envKeyName],
+           !envKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return envKey
+        }
+        return load(for: provider)
+    }
+
+    static func load(for provider: LLMProvider) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: provider.rawValue,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let key = String(data: data, encoding: .utf8),
+              !key.isEmpty else {
+            return nil
+        }
+        return key
+    }
+
+    static func save(_ key: String, for provider: LLMProvider) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw LLMServiceError.missingAPIKey(provider.displayName)
+        }
+
+        let data = Data(trimmed.utf8)
+        let baseQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: provider.rawValue
+        ]
+
+        let updateStatus = SecItemUpdate(
+            baseQuery as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+
+        if updateStatus == errSecItemNotFound {
+            let createStatus = SecItemAdd(
+                (baseQuery.merging([kSecValueData as String: data]) { _, new in new }) as CFDictionary,
+                nil
+            )
+            guard createStatus == errSecSuccess else {
+                throw LLMServiceError.keychainFailure(createStatus)
+            }
+            return
+        }
+
+        guard updateStatus == errSecSuccess else {
+            throw LLMServiceError.keychainFailure(updateStatus)
+        }
+    }
+}
+
+enum LLMServiceError: LocalizedError {
+    case missingAPIKey(String)
+    case invalidResponse
+    case httpError(Int, String)
+    case keychainFailure(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingAPIKey(let provider):
+            return L("\(provider) API key is missing. Use the menu item 'Set API Key...'.", "\(provider) API Key 未设置，请先在菜单中设置。")
+        case .invalidResponse:
+            return L("The provider returned an invalid response.", "模型服务返回了无效响应。")
+        case .httpError(let status, let message):
+            return message.isEmpty ? L("LLM request failed with status \(status).", "LLM 请求失败，状态码 \(status)。") : message
+        case .keychainFailure(let status):
+            return L("Failed to save API key to Keychain (\(status)).", "保存 API Key 到钥匙串失败（\(status)）。")
+        }
+    }
+}
+
+struct CompatibleChatResponseEnvelope: Decodable {
+    let choices: [CompatibleChoice]
+}
+
+struct CompatibleChoice: Decodable {
+    let message: CompatibleMessage
+}
+
+struct CompatibleMessage: Decodable {
+    let content: String
+}
+
+struct CompatibleErrorEnvelope: Decodable {
+    struct APIError: Decodable {
+        let message: String
+    }
+
+    let error: APIError
+}
+
+final class CompatibleLLMAgentService: @unchecked Sendable {
+    private let session: URLSession = .shared
+
+    func rewrite(_ transcript: String, provider: LLMProvider, mode: OutputMode) async throws -> String {
+        guard let apiKey = ProviderKeychain.configuredKey(for: provider) else {
+            throw LLMServiceError.missingAPIKey(provider.displayName)
+        }
+
+        let cleaned = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return transcript }
+
+        let systemPrompt: String
+        switch mode {
+        case .raw:
+            return transcript
+        case .llmAgent:
+            systemPrompt = """
+            Convert the user's transcribed speech into a prompt that can be directly given to an autonomous agent.
+            Preserve the user's meaning exactly.
+            Keep the original language of the user. If the input is Chinese, output Chinese.
+            Do not translate to English unless the user spoke English.
+            Remove filler words and repetition, but do not add new goals, moral framing, or safety reinterpretations.
+            Do not generalize the request into a different task.
+            The output must be directly actionable for an agent, not just a polished sentence.
+            The output MUST always start with:
+            任务：
+            The second section must be chosen based on the user's actual intent:
+            - Use 检查项： for inspection, analysis, troubleshooting, review, directory/file checking, progress review, or multi-step operational tasks.
+            - Use 要求： for writing, rewriting, summarizing, generating, polishing, translating, or whenever the user mainly cares about constraints rather than inspection steps.
+            The final section must always be:
+            输出：
+            Do not output any other headings.
+            Under 检查项： or 要求：, list short lines beginning with "- ".
+            Under 输出：, list the expected deliverables, format, or final output as short lines beginning with "- ".
+            If the user mentions files, directories, plans, versions, updates, or progress, preserve those as explicit work items.
+            If the user is asking to rewrite, summarize, criticize, or transform text, make that task explicit so an agent can execute it directly.
+            If the user already specified constraints or output preferences, keep them.
+            Keep the style concise, practical, and natural. Avoid bureaucratic wording and vague filler unless the user explicitly asked for formal output.
+            Prefer the real execution order the agent should follow.
+            Return only the final three-section prompt and no commentary.
+            """
+        case .spokenCleanup:
+            systemPrompt = """
+            Clean up the user's spoken-language transcription while preserving the speaker's original flavor.
+            Preserve the original meaning exactly.
+            Keep the original language of the user. If the input is Chinese, output Chinese.
+            Remove unnecessary filler words, stutters, repeated fragments, and broken spoken structure where needed.
+            Keep meaningful tone, emotion, emphasis, and personal expression.
+            Do not automatically sanitize slang, blunt wording, emotional wording, or swearing if they are part of the speaker's real expression.
+            Preserve strong emotional phrases such as "我操", "真他妈的", "烦死了", "离谱", and similar expressions when they carry tone or emphasis.
+            Only remove them if they are clearly empty repetition with no semantic or emotional value.
+            Remove hesitation markers such as "嗯", "啊", "那个", "就是", "然后" only when they are obvious fillers rather than meaningful transitions.
+            Do not over-formalize the text.
+            Do not turn it into polished official writing, academic writing, or neutral summary unless the user explicitly asked for that.
+            Prefer minimal cleanup over heavy rewriting.
+            Prefer deleting noise instead of rewriting the sentence into a different style.
+            If the original sentence is short and forceful, keep it short and forceful.
+            Do not add new information, moral framing, or analysis.
+            Do not turn the text into an agent prompt.
+            Return only the cleaned-up version and no commentary.
+            """
+        case .zhEnMixed:
+            systemPrompt = """
+            Rewrite the user's original text into a natural Chinese-dominant mixed Chinese-English style.
+            Preserve the original meaning exactly.
+            Keep the overall sentence mainly in Chinese, but naturally insert common English words or short phrases where they fit.
+            Use visibly mixed wording. Unless the input is extremely short, include at least 2 short English insertions.
+            Preserve key nouns, technical terms, quoted phrases, and domain terms exactly unless there is a very good reason not to.
+            Do not translate the whole sentence into English.
+            Make it feel like a real person casually mixing Chinese and English, not like machine translation.
+            Do not become fully Chinese if the user explicitly chose this mode.
+            Do not add new meaning or explanation.
+            Return only the rewritten version and no commentary.
+            """
+        case .animeChuunibyou:
+            systemPrompt = """
+            Rewrite the user's original text into an over-the-top anime chuunibyou style.
+            Preserve the original meaning, but make the expression dramatic, theatrical, and a little ridiculous in a fun way.
+            You may naturally mix in very common Japanese expressions such as "马萨卡", "诶多", "桥豆麻袋" when fitting.
+            Do not overdo it into nonsense; it should still be understandable.
+            Return only the rewritten version and no commentary.
+            """
+        case .oldInternetMeme:
+            systemPrompt = """
+            Rewrite the user's original text into an old-school Chinese internet meme style.
+            Preserve the original meaning, but express it with cheesy, outdated, familiar web slang and hot-gag language.
+            You may use phrases in the spirit of old web meme culture, such as exaggerated forum-style or early social-media-style wording.
+            Preserve the original task and objects exactly.
+            Preserve key nouns, technical terms, quoted phrases, and domain terms exactly.
+            Do not replace key nouns with unrelated words.
+            Do not hallucinate new targets, people, files, or concepts.
+            Keep it readable and funny rather than chaotic.
+            Return only the rewritten version and no commentary.
+            """
+        case .movieQuoteStyle:
+            systemPrompt = """
+            Rewrite the user's original text into a dramatic movie-quote style line.
+            Preserve the original meaning, but make it sound like a memorable line from a film.
+            Preserve key nouns, technical terms, quoted phrases, and domain terms exactly.
+            Do not claim a false real quote.
+            Do not output long verbatim famous movie lines.
+            Make it an original re-expression with cinematic flavor.
+            Do not append any movie title, source, reference line, or explanation.
+            Return only the rewritten version and no extra commentary.
+            """
+        case .philoSocJargon:
+            systemPrompt = """
+            Rewrite the user's original text into dense, stiff, philosophy-and-sociology-heavy jargon.
+            Preserve the original meaning, but express it in an abstract, over-theorized, concept-heavy way.
+            It is acceptable for the result to sound deliberately awkward, opaque, and full of theory language.
+            Preserve key nouns, technical terms, quoted phrases, and domain terms exactly.
+            You may use vocabulary in the spirit of concepts such as discourse, subjectivity, structure, mediation, reproduction, hegemony, assemblage, symbolic violence, affect, dispositif, ontology, epistemology, and social construction when fitting.
+            Keep the output in the user's original language.
+            Do not make it funny or meme-like; make it sound academically overcooked.
+            Return only the rewritten version and no commentary.
+            """
+        case .sarcasticSnark:
+            systemPrompt = """
+            Rewrite the user's original text into sharp, sarcastic, internet-style snark.
+            Preserve the original meaning, but make the tone pointed, dismissive, and full of indirect mockery.
+            Keep the user's original language.
+            The style should feel like online '夹枪带棒' criticism: biting, ironic, condescending, and playful.
+            It is acceptable to use familiar Chinese internet snark markers in the spirit of expressions like "典", "急", "崩", "孝", "乐" when fitting, but do not force all of them into every sentence.
+            Preserve key nouns, technical terms, quoted phrases, and domain terms exactly.
+            Do not introduce homophone jokes, typo jokes, or word substitutions unless the original text already did that.
+            Target the same person, behavior, or situation implied by the original text.
+            Do not turn the sarcasm toward the speaker unless the original text was self-mocking.
+            Prefer insinuation, irony, and rhetorical pressure over direct swearing.
+            Do not use slurs, threats, or discriminatory language.
+            Keep it concise and sharp rather than long and ranty.
+            Return only the rewritten version and no commentary.
+            """
+        }
+
+        var request = URLRequest(url: provider.baseURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let temperature: Double = switch mode {
+        case .raw, .llmAgent, .spokenCleanup: 0.2
+        case .zhEnMixed, .animeChuunibyou, .oldInternetMeme, .movieQuoteStyle, .philoSocJargon, .sarcasticSnark: 0.7
+        }
+
+        let payload: [String: Any] = [
+            "model": provider.defaultModel,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": systemPrompt
+                ],
+                [
+                    "role": "user",
+                    "content": cleaned
+                ]
+            ],
+            "temperature": temperature
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMServiceError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let decodedMessage = try? JSONDecoder().decode(CompatibleErrorEnvelope.self, from: data).error.message
+            let rawMessage = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = decodedMessage ?? rawMessage ?? ""
+            throw LLMServiceError.httpError(
+                httpResponse.statusCode,
+                L("\(provider.displayName) rejected the request for model \(provider.defaultModel). \(message)",
+                  "\(provider.displayName) 拒绝了模型 \(provider.defaultModel) 的请求。\(message)")
+            )
+        }
+
+        let decoded = try JSONDecoder().decode(CompatibleChatResponseEnvelope.self, from: data)
+        let rewritten = decoded.choices.first?.message.content
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let rewritten, !rewritten.isEmpty else {
+            throw LLMServiceError.invalidResponse
+        }
+
+        return rewritten
     }
 }
 
@@ -475,11 +1073,11 @@ enum TypeNoError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noRecording: "No recording"
-        case .emptyTranscript: "No speech detected"
-        case .coliNotInstalled: "TypeNo needs the local Coli engine. Install it with: npm install -g @marswave/coli"
-        case .npmNotFound: "Node.js is required. Install it from https://nodejs.org"
-        case .coliInstallFailed(let message): "Coli install failed: \(message)"
+        case .noRecording: L("No recording", "没有录音")
+        case .emptyTranscript: L("No speech detected", "没有检测到语音")
+        case .coliNotInstalled: L("TypeNo needs the local Coli engine. Install it with: npm install -g @marswave/coli", "需要本地 Coli 语音引擎，请执行：npm install -g @marswave/coli")
+        case .npmNotFound: L("Node.js is required. Install it from https://nodejs.org", "需要 Node.js，请先安装：https://nodejs.org")
+        case .coliInstallFailed(let message): L("Coli install failed: \(message)", "Coli 安装失败：\(message)")
         case .transcriptionFailed(let message): message
         }
     }
@@ -751,6 +1349,20 @@ final class ColiASRService: @unchecked Sendable {
                     ]
                     let existingPath = env["PATH"] ?? "/usr/bin:/bin"
                     env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+
+                    // Inject macOS system proxy settings so Node.js fetch (undici) can reach
+                    // the internet when a system proxy is configured (e.g. via System Settings).
+                    // GUI apps don't source shell profiles, so HTTP_PROXY / HTTPS_PROXY are
+                    // typically unset even when the system proxy is active.
+                    if env["HTTP_PROXY"] == nil && env["HTTPS_PROXY"] == nil && env["http_proxy"] == nil {
+                        if let proxyURL = Self.systemHTTPSProxyURL() {
+                            env["HTTPS_PROXY"] = proxyURL
+                            env["HTTP_PROXY"] = proxyURL
+                            env["https_proxy"] = proxyURL
+                            env["http_proxy"] = proxyURL
+                        }
+                    }
+
                     process.environment = env
 
                     let stdout = Pipe()
@@ -779,13 +1391,18 @@ final class ColiASRService: @unchecked Sendable {
 
                     try process.run()
 
-                    // 120-second timeout (model download on first run can be slow)
+                    // Dynamic timeout: 2x audio duration, minimum 120s (covers model download on first run)
+                    var audioTimeout: TimeInterval = 120
+                    if let audioFile = try? AVAudioFile(forReading: fileURL) {
+                        let durationSeconds = Double(audioFile.length) / audioFile.processingFormat.sampleRate
+                        audioTimeout = max(120, durationSeconds * 2.0)
+                    }
                     let timeoutItem = DispatchWorkItem {
                         if process.isRunning {
                             process.terminate()
                         }
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeoutItem)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + audioTimeout, execute: timeoutItem)
 
                     process.waitUntilExit()
                     timeoutItem.cancel()
@@ -816,6 +1433,25 @@ final class ColiASRService: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Returns the macOS system HTTPS proxy as an "http://host:port" string, or nil if none is set.
+    static func systemHTTPSProxyURL() -> String? {
+        guard let proxySettings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] else {
+            return nil
+        }
+        // Check HTTPS proxy first, fall back to HTTP proxy
+        if let httpsEnabled = proxySettings[kCFNetworkProxiesHTTPSEnable as String] as? Int, httpsEnabled == 1,
+           let host = proxySettings[kCFNetworkProxiesHTTPSProxy as String] as? String,
+           let port = proxySettings[kCFNetworkProxiesHTTPSPort as String] as? Int, !host.isEmpty {
+            return "http://\(host):\(port)"
+        }
+        if let httpEnabled = proxySettings[kCFNetworkProxiesHTTPEnable as String] as? Int, httpEnabled == 1,
+           let host = proxySettings[kCFNetworkProxiesHTTPProxy as String] as? String,
+           let port = proxySettings[kCFNetworkProxiesHTTPPort as String] as? Int, !host.isEmpty {
+            return "http://\(host):\(port)"
+        }
+        return nil
     }
 
     static func findNpmPath() -> String? {
@@ -986,24 +1622,37 @@ final class ColiASRService: @unchecked Sendable {
     }
 }
 
-// MARK: - Hotkey Monitor (short-press Control only)
+// MARK: - Hotkey Monitor
 
 @MainActor
 final class HotkeyMonitor {
+    private let modifier: HotkeyModifier
+    private let triggerMode: TriggerMode
     private let onToggle: () -> Void
     private var flagsMonitor: Any?
     private var keyMonitor: Any?
     private var localFlagsMonitor: Any?
     private var localKeyMonitor: Any?
-    private var controlDownAt: Date?
+    private var keyDownAt: Date?
+    private var firstTapAt: Date?
     private var otherKeyPressed = false
 
-    init(onToggle: @escaping () -> Void) {
+    init(modifier: HotkeyModifier = .leftControl, triggerMode: TriggerMode = .singleTap, onToggle: @escaping () -> Void) {
+        self.modifier = modifier
+        self.triggerMode = triggerMode
         self.onToggle = onToggle
     }
 
+    func stop() {
+        [flagsMonitor, keyMonitor, localFlagsMonitor, localKeyMonitor]
+            .compactMap { $0 }
+            .forEach { NSEvent.removeMonitor($0) }
+        flagsMonitor = nil; keyMonitor = nil
+        localFlagsMonitor = nil; localKeyMonitor = nil
+    }
+
     func start() {
-        // Track key presses while Control is held (both global and local)
+        // Track key presses while modifier is held (both global and local)
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] _ in
             self?.otherKeyPressed = true
         }
@@ -1013,40 +1662,55 @@ final class HotkeyMonitor {
         }
 
         flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            Task { @MainActor in
-                self?.handle(event: event)
-            }
+            Task { @MainActor in self?.handle(event: event) }
         }
         localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            Task { @MainActor in
-                self?.handle(event: event)
-            }
+            Task { @MainActor in self?.handle(event: event) }
             return event
         }
     }
 
-    private func handle(event: NSEvent) {
-        let controlPressed = event.modifierFlags.contains(.control)
-        // If any other modifier is also held, it's a combo — ignore
-        let otherModifiers: NSEvent.ModifierFlags = [.shift, .option, .command, .function]
-        let hasOtherModifier = !event.modifierFlags.intersection(otherModifiers).isEmpty
+    private static let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 58, 59, 60, 61, 62]
 
-        if controlPressed && !hasOtherModifier {
-            // Pure Control just went down
-            if controlDownAt == nil {
-                controlDownAt = Date()
+    private func handle(event: NSEvent) {
+        var others: NSEvent.ModifierFlags = [.shift, .option, .command, .control, .function]
+        others.remove(modifier.flag)
+        let hasOtherModifier = !event.modifierFlags.intersection(others).isEmpty
+
+        if event.keyCode == modifier.keyCode {
+            if keyDownAt == nil {
+                // Key press — modifier flag becomes set
+                if event.modifierFlags.contains(modifier.flag) && !hasOtherModifier {
+                    keyDownAt = Date()
+                    otherKeyPressed = false
+                }
+            } else if let downAt = keyDownAt {
+                // Key release — modifier flag clears
+                let elapsed = Date().timeIntervalSince(downAt)
+                let isQuickRelease = elapsed < 0.3 && !otherKeyPressed && !hasOtherModifier
+                if isQuickRelease {
+                    switch triggerMode {
+                    case .singleTap:
+                        onToggle()
+                    case .doubleTap:
+                        if let firstTap = firstTapAt {
+                            if Date().timeIntervalSince(firstTap) < 0.5 {
+                                onToggle()
+                                firstTapAt = nil
+                            } else {
+                                firstTapAt = Date()
+                            }
+                        } else {
+                            firstTapAt = Date()
+                        }
+                    }
+                }
+                keyDownAt = nil
                 otherKeyPressed = false
             }
-        } else {
-            // Control released or another modifier involved
-            if let downAt = controlDownAt {
-                let elapsed = Date().timeIntervalSince(downAt)
-                if elapsed < 0.3 && !otherKeyPressed && !hasOtherModifier {
-                    onToggle()
-                }
-            }
-            controlDownAt = nil
-            otherKeyPressed = false
+        } else if keyDownAt != nil && Self.modifierKeyCodes.contains(event.keyCode) {
+            // Another modifier pressed while ours is held — mark as chord, don't trigger
+            otherKeyPressed = true
         }
     }
 }
@@ -1055,8 +1719,10 @@ final class HotkeyMonitor {
 
 @MainActor
 final class StatusItemController: NSObject {
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let statusItem = NSStatusBar.system.statusItem(withLength: 28)
     private var cancellable: AnyCancellable?
+    private var modeCancellable: AnyCancellable?
+    private var providerCancellable: AnyCancellable?
     private weak var appState: AppState?
 
     init(appState: AppState) {
@@ -1069,6 +1735,12 @@ final class StatusItemController: NSObject {
             self?.updateTitle(for: phase)
             self?.updateRecordMenuItem(for: phase)
         }
+        modeCancellable = appState.$outputMode.sink { [weak self] mode in
+            self?.updateModeMenuItem(for: mode)
+        }
+        providerCancellable = appState.$llmProvider.sink { [weak self] provider in
+            self?.updateProviderMenu(for: provider)
+        }
     }
 
     private func configureDragDrop() {
@@ -1080,25 +1752,149 @@ final class StatusItemController: NSObject {
     private func configureMenu() {
         let menu = NSMenu()
 
-        let recordItem = NSMenuItem(title: "Record  ⌃", action: #selector(toggleRecording), keyEquivalent: "")
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let aboutItem = NSMenuItem(title: "TypeNo Agent  v\(version)", action: nil, keyEquivalent: "")
+        aboutItem.isEnabled = false
+        menu.addItem(aboutItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let mod = UserDefaults.standard.hotkeyModifier
+        let recordItem = NSMenuItem(title: L("Record  \(mod.symbol)", "录音  \(mod.symbol)"), action: #selector(toggleRecording), keyEquivalent: "")
         recordItem.target = self
         recordItem.tag = 100
         menu.addItem(recordItem)
 
-        let transcribeItem = NSMenuItem(title: "Transcribe File...", action: #selector(transcribeFile), keyEquivalent: "")
+        let transcribeItem = NSMenuItem(title: L("Transcribe File to Clipboard...", "转录文件到剪贴板..."), action: #selector(transcribeFile), keyEquivalent: "")
         transcribeItem.target = self
         menu.addItem(transcribeItem)
 
         menu.addItem(NSMenuItem.separator())
 
-        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
+        let modeMenuItem = NSMenuItem(title: L("Default Mode (used by Left Option)", "默认输出模式（左 Option 使用）"), action: nil, keyEquivalent: "")
+        modeMenuItem.submenu = NSMenu(title: L("Default Mode (used by Left Option)", "默认输出模式（左 Option 使用）"))
+        let rawModeItem = NSMenuItem(title: L("Raw", "普通"), action: #selector(selectRawMode), keyEquivalent: "")
+        rawModeItem.target = self
+        rawModeItem.tag = 150
+        modeMenuItem.submenu?.addItem(rawModeItem)
+        let agentModeItem = NSMenuItem(title: L("Agent", "Agent"), action: #selector(selectAgentMode), keyEquivalent: "")
+        agentModeItem.target = self
+        agentModeItem.tag = 151
+        modeMenuItem.submenu?.addItem(agentModeItem)
+        let formalModeItem = NSMenuItem(title: L("Spoken Cleanup", "口语整理"), action: #selector(selectFormalMode), keyEquivalent: "")
+        formalModeItem.target = self
+        formalModeItem.tag = 152
+        modeMenuItem.submenu?.addItem(formalModeItem)
+        let zhEnModeItem = NSMenuItem(title: L("Zh-En Mix", "中英夹杂"), action: #selector(selectZhEnMixedMode), keyEquivalent: "")
+        zhEnModeItem.target = self
+        zhEnModeItem.tag = 153
+        modeMenuItem.submenu?.addItem(zhEnModeItem)
+        let animeModeItem = NSMenuItem(title: L("Anime Chuunibyou", "日漫中二"), action: #selector(selectAnimeMode), keyEquivalent: "")
+        animeModeItem.target = self
+        animeModeItem.tag = 154
+        modeMenuItem.submenu?.addItem(animeModeItem)
+        let memeModeItem = NSMenuItem(title: L("Old Internet Meme", "网络热梗"), action: #selector(selectMemeMode), keyEquivalent: "")
+        memeModeItem.target = self
+        memeModeItem.tag = 155
+        modeMenuItem.submenu?.addItem(memeModeItem)
+        let movieModeItem = NSMenuItem(title: L("Movie Quote Style", "电影台词风"), action: #selector(selectMovieMode), keyEquivalent: "")
+        movieModeItem.target = self
+        movieModeItem.tag = 156
+        modeMenuItem.submenu?.addItem(movieModeItem)
+        let philoModeItem = NSMenuItem(title: L("Philo-Soc Jargon", "哲学社会学黑话"), action: #selector(selectPhiloMode), keyEquivalent: "")
+        philoModeItem.target = self
+        philoModeItem.tag = 157
+        modeMenuItem.submenu?.addItem(philoModeItem)
+        let snarkModeItem = NSMenuItem(title: L("Sarcastic Snark", "阴阳吐槽"), action: #selector(selectSnarkMode), keyEquivalent: "")
+        snarkModeItem.target = self
+        snarkModeItem.tag = 158
+        modeMenuItem.submenu?.addItem(snarkModeItem)
+        menu.addItem(modeMenuItem)
+
+        let providerMenuItem = NSMenuItem(title: L("Provider", "模型提供方"), action: nil, keyEquivalent: "")
+        providerMenuItem.submenu = NSMenu(title: L("Provider", "模型提供方"))
+        let qwenItem = NSMenuItem(title: "Qwen", action: #selector(selectQwenProvider), keyEquivalent: "")
+        qwenItem.target = self
+        qwenItem.tag = 160
+        providerMenuItem.submenu?.addItem(qwenItem)
+        let kimiItem = NSMenuItem(title: "Kimi", action: #selector(selectKimiProvider), keyEquivalent: "")
+        kimiItem.target = self
+        kimiItem.tag = 161
+        providerMenuItem.submenu?.addItem(kimiItem)
+        menu.addItem(providerMenuItem)
+
+        let apiKeyItem = NSMenuItem(title: L("Set API Key...", "设置 API Key..."), action: #selector(setProviderAPIKey), keyEquivalent: "")
+        apiKeyItem.target = self
+        apiKeyItem.tag = 170
+        menu.addItem(apiKeyItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let hotkeyItem = NSMenuItem(title: L("Default Mode Hotkey", "默认模式快捷键"), action: nil, keyEquivalent: "")
+        let hotkeySub = NSMenu()
+        for (i, m) in HotkeyModifier.allCases.enumerated() {
+            let item = NSMenuItem(title: m.label, action: #selector(changeHotkey(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = 300 + i
+            item.state = m == mod ? .on : .off
+            hotkeySub.addItem(item)
+        }
+        menu.setSubmenu(hotkeySub, for: hotkeyItem)
+        menu.addItem(hotkeyItem)
+
+        let llmHotkeyItem = NSMenuItem(title: L("Agent Hotkey", "Agent 快捷键"), action: nil, keyEquivalent: "")
+        let llmHotkeySub = NSMenu()
+        let llmMod = UserDefaults.standard.llmHotkeyModifier
+        for (i, m) in HotkeyModifier.allCases.enumerated() {
+            let item = NSMenuItem(title: m.label, action: #selector(changeLLMHotkey(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = 500 + i
+            item.state = m == llmMod ? .on : .off
+            llmHotkeySub.addItem(item)
+        }
+        menu.setSubmenu(llmHotkeySub, for: llmHotkeyItem)
+        menu.addItem(llmHotkeyItem)
+
+        let cleanupHotkeyItem = NSMenuItem(title: L("Spoken Cleanup Hotkey", "口语整理快捷键"), action: nil, keyEquivalent: "")
+        let cleanupHotkeySub = NSMenu()
+        let formalMod = UserDefaults.standard.formalHotkeyModifier
+        for (i, m) in HotkeyModifier.allCases.enumerated() {
+            let item = NSMenuItem(title: m.label, action: #selector(changeFormalHotkey(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = 600 + i
+            item.state = m == formalMod ? .on : .off
+            cleanupHotkeySub.addItem(item)
+        }
+        menu.setSubmenu(cleanupHotkeySub, for: cleanupHotkeyItem)
+        menu.addItem(cleanupHotkeyItem)
+
+        let triggerItem = NSMenuItem(title: L("Trigger Mode", "普通快捷键触发方式"), action: nil, keyEquivalent: "")
+        let triggerSub = NSMenu()
+        let curTrigger = UserDefaults.standard.triggerMode
+        for (i, t) in TriggerMode.allCases.enumerated() {
+            let item = NSMenuItem(title: t.label, action: #selector(changeTriggerMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = 400 + i
+            item.state = t == curTrigger ? .on : .off
+            triggerSub.addItem(item)
+        }
+        menu.setSubmenu(triggerSub, for: triggerItem)
+        menu.addItem(triggerItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let updateItem = NSMenuItem(
+            title: L("Check Upstream Updates...", "检查上游更新..."),
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
         updateItem.target = self
         updateItem.tag = 200
         menu.addItem(updateItem)
 
-        menu.addItem(NSMenuItem(title: "Open Privacy Settings", action: #selector(openPrivacySettings), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: L("Open Privacy Settings", "打开隐私设置"), action: #selector(openPrivacySettings), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit TypeNo", action: #selector(quit), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: L("Quit TypeNo Agent", "退出 TypeNo Agent"), action: #selector(quit), keyEquivalent: "q"))
 
         menu.items.forEach { $0.target = self }
         statusItem.menu = menu
@@ -1106,24 +1902,151 @@ final class StatusItemController: NSObject {
 
     private func updateRecordMenuItem(for phase: AppPhase) {
         guard let item = statusItem.menu?.item(withTag: 100) else { return }
+        let sym = UserDefaults.standard.hotkeyModifier.symbol
         switch phase {
         case .recording:
-            item.title = "Stop Recording"
+            item.title = L("Stop Recording", "停止录音")
         default:
-            item.title = "Record"
+            let modeName = appState?.outputMode.menuTitle ?? L("Raw", "普通")
+            item.title = L("Record  \(sym)  [\(modeName)]", "录音  \(sym)  [\(modeName)]")
         }
     }
 
-    private func updateTitle(for phase: AppPhase) {
-        statusItem.button?.title = switch phase {
-        case .idle: "⌃"
-        case .recording: "Rec"
-        case .transcribing: "..."
-        case .done: "✓"
-        case .updating: "↓"
-        case .permissions, .missingColi, .installingColi: "!"
-        case .error: "!"
+    private func updateModeMenuItem(for mode: OutputMode) {
+        statusItem.menu?.item(withTag: 150)?.state = mode == .raw ? .on : .off
+        statusItem.menu?.item(withTag: 151)?.state = mode == .llmAgent ? .on : .off
+        statusItem.menu?.item(withTag: 152)?.state = mode == .spokenCleanup ? .on : .off
+        statusItem.menu?.item(withTag: 153)?.state = mode == .zhEnMixed ? .on : .off
+        statusItem.menu?.item(withTag: 154)?.state = mode == .animeChuunibyou ? .on : .off
+        statusItem.menu?.item(withTag: 155)?.state = mode == .oldInternetMeme ? .on : .off
+        statusItem.menu?.item(withTag: 156)?.state = mode == .movieQuoteStyle ? .on : .off
+        statusItem.menu?.item(withTag: 157)?.state = mode == .philoSocJargon ? .on : .off
+        statusItem.menu?.item(withTag: 158)?.state = mode == .sarcasticSnark ? .on : .off
+    }
+
+    private func updateProviderMenu(for provider: LLMProvider) {
+        statusItem.menu?.item(withTag: 160)?.state = provider == .qwen ? .on : .off
+        statusItem.menu?.item(withTag: 161)?.state = provider == .kimi ? .on : .off
+        statusItem.menu?.item(withTag: 170)?.title = L("Set \(provider.displayName) API Key...", "设置 \(provider.displayName) API Key...")
+        if let mode = appState?.outputMode {
+            updateModeMenuItem(for: mode)
         }
+    }
+
+    private func makeSymbolImage(_ symbol: String) -> NSImage {
+        let size = NSSize(width: 22, height: 22)
+        let img = NSImage(size: size, flipped: false) { rect in
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 16, weight: .medium),
+                .foregroundColor: NSColor.black
+            ]
+            let str = symbol as NSString
+            let strSize = str.size(withAttributes: attrs)
+            let pt = NSPoint(
+                x: (rect.width - strSize.width) / 2,
+                y: (rect.height - strSize.height) / 2
+            )
+            str.draw(at: pt, withAttributes: attrs)
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
+    private func updateTitle(for phase: AppPhase) {
+        guard let button = statusItem.button else { return }
+        switch phase {
+        case .idle:
+            button.image = makeSymbolImage("◎")
+            button.imagePosition = .imageOnly
+            if let appState {
+                switch appState.outputMode {
+                case .raw:
+                    button.title = ""
+                case .llmAgent:
+                    button.title = appState.llmProvider == .qwen ? " Q" : " K"
+                case .spokenCleanup:
+                    button.title = " 整"
+                case .zhEnMixed:
+                    button.title = " 混"
+                case .animeChuunibyou:
+                    button.title = " 中"
+                case .oldInternetMeme:
+                    button.title = " 梗"
+                case .movieQuoteStyle:
+                    button.title = " 影"
+                case .philoSocJargon:
+                    button.title = " 理"
+                case .sarcasticSnark:
+                    button.title = " 怼"
+                }
+            } else {
+                button.title = ""
+            }
+        default:
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = switch phase {
+            case .recording: "Rec"
+            case .transcribing: "..."
+            case .done: "✓"
+            case .updating: "↓"
+            default: "!"
+            }
+        }
+    }
+
+    @objc private func changeHotkey(_ sender: NSMenuItem) {
+        let idx = sender.tag - 300
+        guard let mod = HotkeyModifier.allCases[safe: idx] else { return }
+        guard mod != UserDefaults.standard.llmHotkeyModifier,
+              mod != UserDefaults.standard.formalHotkeyModifier else {
+            appState?.showError(L("Hotkeys must be different.", "三个快捷键不能相同。"))
+            return
+        }
+        UserDefaults.standard.hotkeyModifier = mod
+        // Update checkmarks
+        sender.menu?.items.forEach { $0.state = $0.tag == sender.tag ? .on : .off }
+        // Refresh title + record item
+        if let phase = appState?.phase {
+            updateTitle(for: phase)
+            updateRecordMenuItem(for: phase)
+        }
+        NotificationCenter.default.post(name: .hotkeyConfigChanged, object: nil)
+    }
+
+    @objc private func changeTriggerMode(_ sender: NSMenuItem) {
+        let idx = sender.tag - 400
+        guard let mode = TriggerMode.allCases[safe: idx] else { return }
+        UserDefaults.standard.triggerMode = mode
+        sender.menu?.items.forEach { $0.state = $0.tag == sender.tag ? .on : .off }
+        NotificationCenter.default.post(name: .hotkeyConfigChanged, object: nil)
+    }
+
+    @objc private func changeLLMHotkey(_ sender: NSMenuItem) {
+        let idx = sender.tag - 500
+        guard let mod = HotkeyModifier.allCases[safe: idx] else { return }
+        guard mod != UserDefaults.standard.hotkeyModifier,
+              mod != UserDefaults.standard.formalHotkeyModifier else {
+            appState?.showError(L("Hotkeys must be different.", "三个快捷键不能相同。"))
+            return
+        }
+        UserDefaults.standard.llmHotkeyModifier = mod
+        sender.menu?.items.forEach { $0.state = $0.tag == sender.tag ? .on : .off }
+        NotificationCenter.default.post(name: .hotkeyConfigChanged, object: nil)
+    }
+
+    @objc private func changeFormalHotkey(_ sender: NSMenuItem) {
+        let idx = sender.tag - 600
+        guard let mod = HotkeyModifier.allCases[safe: idx] else { return }
+        guard mod != UserDefaults.standard.hotkeyModifier,
+              mod != UserDefaults.standard.llmHotkeyModifier else {
+            appState?.showError(L("Hotkeys must be different.", "三个快捷键不能相同。"))
+            return
+        }
+        UserDefaults.standard.formalHotkeyModifier = mod
+        sender.menu?.items.forEach { $0.state = $0.tag == sender.tag ? .on : .off }
+        NotificationCenter.default.post(name: .hotkeyConfigChanged, object: nil)
     }
 
     @objc private func openPrivacySettings() {
@@ -1134,13 +2057,74 @@ final class StatusItemController: NSObject {
         appState?.onToggleRequest?()
     }
 
+    private func ensureProviderKeyIfNeeded(for mode: OutputMode) -> Bool {
+        guard let appState else { return false }
+        guard mode != .raw else { return true }
+        if ProviderKeychain.configuredKey(for: appState.llmProvider) == nil {
+            setProviderAPIKey()
+        }
+        return ProviderKeychain.configuredKey(for: appState.llmProvider) != nil
+    }
+
+    @objc private func selectRawMode() {
+        appState?.outputMode = .raw
+    }
+
+    @objc private func selectAgentMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .llmAgent) else { return }
+        appState.outputMode = .llmAgent
+    }
+
+    @objc private func selectFormalMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .spokenCleanup) else { return }
+        appState.outputMode = .spokenCleanup
+    }
+
+    @objc private func selectZhEnMixedMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .zhEnMixed) else { return }
+        appState.outputMode = .zhEnMixed
+    }
+
+    @objc private func selectAnimeMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .animeChuunibyou) else { return }
+        appState.outputMode = .animeChuunibyou
+    }
+
+    @objc private func selectMemeMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .oldInternetMeme) else { return }
+        appState.outputMode = .oldInternetMeme
+    }
+
+    @objc private func selectMovieMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .movieQuoteStyle) else { return }
+        appState.outputMode = .movieQuoteStyle
+    }
+
+    @objc private func selectPhiloMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .philoSocJargon) else { return }
+        appState.outputMode = .philoSocJargon
+    }
+
+    @objc private func selectSnarkMode() {
+        guard let appState else { return }
+        guard ensureProviderKeyIfNeeded(for: .sarcasticSnark) else { return }
+        appState.outputMode = .sarcasticSnark
+    }
+
     @objc private func checkForUpdates() {
         appState?.onUpdateRequest?()
     }
 
     func setUpdateAvailable(_ version: String) {
         guard let item = statusItem.menu?.item(withTag: 200) else { return }
-        item.title = "Update Available (v\(version))"
+        item.title = L("Upstream Update Available (v\(version))", "发现上游更新 (v\(version))")
     }
 
     @objc private func transcribeFile() {
@@ -1154,12 +2138,45 @@ final class StatusItemController: NSObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose an audio file to transcribe"
+        panel.message = L("Choose an audio file — result will be copied to clipboard", "选择一个音频文件，结果会复制到剪贴板")
 
         if panel.runModal() == .OK, let url = panel.url {
             Task { @MainActor in
                 await appState?.transcribeFile(url)
             }
+        }
+    }
+
+    @objc private func selectQwenProvider() {
+        appState?.llmProvider = .qwen
+    }
+
+    @objc private func selectKimiProvider() {
+        appState?.llmProvider = .kimi
+    }
+
+    @objc private func setProviderAPIKey() {
+        guard let appState else { return }
+        let alert = NSAlert()
+        alert.messageText = L("Set \(appState.llmProvider.displayName) API Key", "设置 \(appState.llmProvider.displayName) API Key")
+        alert.informativeText = L(
+            "TypeNo Agent will use this key when \(appState.llmProvider.displayName) is selected for LLM mode.",
+            "当选择 \(appState.llmProvider.displayName) 作为 LLM 模式提供方时，将使用这个 key。"
+        )
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: L("Save", "保存"))
+        alert.addButton(withTitle: L("Cancel", "取消"))
+
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        input.placeholderString = L("API Key", "API Key")
+        alert.accessoryView = input
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try ProviderKeychain.save(input.stringValue, for: appState.llmProvider)
+        } catch {
+            appState.showError(error.localizedDescription)
         }
     }
 
@@ -1310,6 +2327,13 @@ struct OverlayView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
+            } else if case .recording = appState.phase {
+                let nearLimit = appState.recordingElapsedSeconds >= 105  // 1:45
+                Text(nearLimit
+                     ? L("⚠ \(appState.recordingElapsedStr)", "⚠ \(appState.recordingElapsedStr)")
+                     : appState.recordingElapsedStr)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(nearLimit ? Color.orange : Color.primary)
             } else {
                 Text(appState.phase.subtitle)
                     .font(.system(size: 13))
@@ -1317,7 +2341,7 @@ struct OverlayView: View {
             }
 
             if case .error = appState.phase {
-                Button("OK") {
+                Button(L("OK", "好")) {
                     appState.onCancel?()
                 }
                 .buttonStyle(.borderless)
@@ -1349,7 +2373,7 @@ struct OverlayView: View {
 
                     Spacer()
 
-                    Button("Open Settings") {
+                    Button(L("Open Settings", "打开设置")) {
                         appState.onPermissionOpen?(kind)
                     }
                     .buttonStyle(.borderedProminent)
@@ -1358,11 +2382,11 @@ struct OverlayView: View {
             }
 
             HStack {
-                Text("Checking automatically...")
+                Text(L("Checking automatically...", "自动检测中..."))
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                 Spacer()
-                Button("Cancel") {
+                Button(L("Cancel", "取消")) {
                     appState.onCancel?()
                 }
                 .buttonStyle(.borderless)
@@ -1388,9 +2412,9 @@ struct OverlayView: View {
                     .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Node.js Required")
+                    Text(L("Node.js Required", "需要 Node.js"))
                         .font(.system(size: 13, weight: .medium))
-                    Text("Install Node.js first, then TypeNo will set up automatically.")
+                    Text(L("Install Node.js first, then TypeNo will set up automatically.", "请先安装 Node.js，TypeNo 将自动配置。"))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -1417,11 +2441,11 @@ struct OverlayView: View {
             }
 
             HStack {
-                Text("Checking automatically...")
+                Text(L("Checking automatically...", "自动检测中..."))
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                 Spacer()
-                Button("Cancel") {
+                Button(L("Cancel", "取消")) {
                     appState.onCancel?()
                 }
                 .buttonStyle(.borderless)
@@ -1446,7 +2470,7 @@ struct OverlayView: View {
                     .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Setting up speech engine")
+                    Text(L("Setting up speech engine", "配置语音引擎"))
                         .font(.system(size: 13, weight: .medium))
                     Text(message)
                         .font(.system(size: 11))
@@ -1469,129 +2493,71 @@ struct OverlayView: View {
 // MARK: - Update Service
 
 final class UpdateService: @unchecked Sendable {
-    static let repoOwner = "marswaveai"
-    static let repoName = "TypeNo"
-    static let assetName = "TypeNo.app.zip"
+    static let upstreamRepoOwner = "marswaveai"
+    static let upstreamRepoName = "TypeNo"
 
     struct ReleaseInfo {
         let version: String
-        let downloadURL: URL
+        let releaseURL: URL
+    }
+
+    enum CheckResult {
+        case updateAvailable(ReleaseInfo)
+        case upToDate
+        case rateLimited
+        case failed
     }
 
     func checkForUpdate() async -> ReleaseInfo? {
-        guard let url = URL(string: "https://api.github.com/repos/\(Self.repoOwner)/\(Self.repoName)/releases/latest") else {
-            return nil
+        switch await checkForUpdateDetailed() {
+        case .updateAvailable(let info): return info
+        default: return nil
+        }
+    }
+
+    func checkForUpdateDetailed() async -> CheckResult {
+        guard let url = URL(string: "https://api.github.com/repos/\(Self.upstreamRepoOwner)/\(Self.upstreamRepoName)/releases/latest") else {
+            return .failed
         }
 
         do {
             var request = URLRequest(url: url)
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            request.setValue(
+                "TypeNoAgent/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0")",
+                forHTTPHeaderField: "User-Agent"
+            )
             let (data, _) = try await URLSession.shared.data(for: request)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tagName = json["tag_name"] as? String,
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return .failed
+            }
+
+            // GitHub rate limit error
+            if json["message"] as? String != nil && json["tag_name"] == nil {
+                return .rateLimited
+            }
+
+            guard let tagName = json["tag_name"] as? String,
+                  let releaseURLString = json["html_url"] as? String,
+                  let releaseURL = URL(string: releaseURLString),
                   let assets = json["assets"] as? [[String: Any]] else {
-                return nil
+                return .failed
             }
 
             let remoteVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
             let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
 
             guard Self.isNewer(remote: remoteVersion, current: currentVersion) else {
-                return nil
+                return .upToDate
             }
 
-            guard let asset = assets.first(where: { ($0["name"] as? String) == Self.assetName }),
-                  let downloadURLString = asset["browser_download_url"] as? String,
-                  let downloadURL = URL(string: downloadURLString) else {
-                return nil
+            guard assets.isEmpty == false else {
+                return .failed
             }
 
-            return ReleaseInfo(version: remoteVersion, downloadURL: downloadURL)
+            return .updateAvailable(ReleaseInfo(version: remoteVersion, releaseURL: releaseURL))
         } catch {
-            return nil
-        }
-    }
-
-    func downloadAndInstall(from downloadURL: URL, onProgress: @MainActor @Sendable (String) -> Void) async throws {
-        await onProgress("Downloading update...")
-
-        // Download zip to temp
-        let (zipURL, _) = try await URLSession.shared.download(from: downloadURL)
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo-update-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-
-        let zipDest = tempDir.appendingPathComponent(Self.assetName)
-        if FileManager.default.fileExists(atPath: zipDest.path) {
-            try FileManager.default.removeItem(at: zipDest)
-        }
-        try FileManager.default.moveItem(at: zipURL, to: zipDest)
-
-        await onProgress("Installing update...")
-
-        // Unzip
-        let unzip = Process()
-        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        unzip.arguments = ["-o", zipDest.path, "-d", tempDir.path]
-        unzip.standardOutput = FileHandle.nullDevice
-        unzip.standardError = FileHandle.nullDevice
-        try unzip.run()
-        unzip.waitUntilExit()
-
-        guard unzip.terminationStatus == 0 else {
-            throw UpdateError.unzipFailed
-        }
-
-        let newAppURL = tempDir.appendingPathComponent("TypeNo.app")
-        guard FileManager.default.fileExists(atPath: newAppURL.path) else {
-            throw UpdateError.appNotFound
-        }
-
-        // Remove quarantine
-        let xattr = Process()
-        xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
-        xattr.arguments = ["-rd", "com.apple.quarantine", newAppURL.path]
-        xattr.standardOutput = FileHandle.nullDevice
-        xattr.standardError = FileHandle.nullDevice
-        try? xattr.run()
-        xattr.waitUntilExit()
-
-        // Replace current app
-        let currentAppURL = Bundle.main.bundleURL
-        let appParent = currentAppURL.deletingLastPathComponent()
-        let backupURL = appParent.appendingPathComponent("TypeNo.app.bak")
-
-        // Remove old backup if exists
-        if FileManager.default.fileExists(atPath: backupURL.path) {
-            try FileManager.default.removeItem(at: backupURL)
-        }
-
-        // Move current → backup
-        try FileManager.default.moveItem(at: currentAppURL, to: backupURL)
-
-        // Move new → current
-        do {
-            try FileManager.default.moveItem(at: newAppURL, to: currentAppURL)
-        } catch {
-            // Rollback if move fails
-            try? FileManager.default.moveItem(at: backupURL, to: currentAppURL)
-            throw UpdateError.replaceFailed
-        }
-
-        // Clean up backup and temp
-        try? FileManager.default.removeItem(at: backupURL)
-        try? FileManager.default.removeItem(at: tempDir)
-
-        await onProgress("Restarting...")
-
-        // Relaunch
-        let appPath = currentAppURL.path
-        let script = Process()
-        script.executableURL = URL(fileURLWithPath: "/bin/sh")
-        script.arguments = ["-c", "sleep 1 && open \"\(appPath)\""]
-        try script.run()
-
-        await MainActor.run {
-            NSApp.terminate(nil)
+            return .failed
         }
     }
 
@@ -1605,20 +2571,6 @@ final class UpdateService: @unchecked Sendable {
             if rv < cv { return false }
         }
         return false
-    }
-}
-
-enum UpdateError: LocalizedError {
-    case unzipFailed
-    case appNotFound
-    case replaceFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .unzipFailed: "Failed to unzip update"
-        case .appNotFound: "Update package is invalid"
-        case .replaceFailed: "Failed to replace app"
-        }
     }
 }
 

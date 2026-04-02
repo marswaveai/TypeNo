@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "typeno",
+    name: "typeno-agent",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "TypeNo", targets: ["TypeNo"])
+        .executable(name: "TypeNoAgent", targets: ["TypeNoAgent"])
     ],
     targets: [
         .executableTarget(
-            name: "TypeNo",
+            name: "TypeNoAgent",
             path: "Sources/Typeno",
             linkerSettings: [
                 .unsafeFlags([

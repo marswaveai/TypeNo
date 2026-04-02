@@ -1,12 +1,12 @@
-# TypeNo
+# TypeNo Agent
 
 [English](README.md) | [中文](README_CN.md)
 
-**無料・オープンソース・プライバシー優先の macOS 音声入力ツール。**
+**TypeNo をベースにした、プライバシー重視の macOS 音声入力・書き換えツール。**
 
-![TypeNo hero image](assets/hero.webp)
+![TypeNo Agent hero image](assets/hero.webp)
 
-ミニマルな macOS 音声入力アプリ。TypeNo はあなたの声をキャプチャし、ローカルで文字起こしし、使用中のアプリに自動ペーストします — すべて1秒以内。
+`TypeNo Agent` は `TypeNo` をベースにした fork です。音声をローカルで文字起こしし、必要に応じて LLM で書き換えたうえで、現在使っているアプリへ自動ペーストします。
 
 公式サイト: [https://typeno.com](https://typeno.com)
 
@@ -14,36 +14,39 @@
 
 ## 使い方
 
-1. **Control を短く押す** と録音開始
-2. **もう一度 Control を短く押す** と停止
-3. テキストが自動的に文字起こしされ、アクティブなアプリにペーストされます（クリップボードにもコピー）
+1. 対応するホットキーで録音開始
+2. 同じホットキーをもう一度押して停止
+3. ローカル文字起こし後、モードに応じて書き換えを行い、アクティブなアプリに自動ペースト
 
-それだけです。ウィンドウなし、設定なし、アカウント不要。
+現在のデフォルトホットキー:
+
+- 左 `Option` = 現在のデフォルトモード
+- 左 `Control` = `口語整理`
+- 右 `Control` = `Agent`
 
 ## インストール
 
 ### 方法 1：アプリをダウンロード
 
-- [TypeNo for macOS をダウンロード](https://github.com/marswaveai/TypeNo/releases/latest)
-- 最新の `TypeNo.app.zip` をダウンロード
-- 解凍して `TypeNo.app` を `/Applications` に移動
-- TypeNo を起動
+- 現在の `TypeNo Agent.app` をダウンロード
+- 解凍して `TypeNo Agent.app` を `/Applications` または `~/Applications` に移動
+- `TypeNo Agent` を起動
 
 #### macOS がアプリを破損と表示する場合
 
 現在のリリースはまだ Apple の公証を通していないため、macOS がブロックすることがあります。
 
-1. Finder で `TypeNo.app` を右クリックして **開く** を選ぶ
+1. Finder で `TypeNo Agent.app` を右クリックして **開く** を選ぶ
 2. **システム設定 → プライバシーとセキュリティ → このまま開く** が表示される場合はそちらを使用
 3. それでもブロックされる場合は Terminal で：
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/TypeNo.app"
+xattr -dr com.apple.quarantine "/Applications/TypeNo Agent.app"
 ```
 
 ### 音声認識エンジンをインストール
 
-TypeNo はローカル音声認識に [coli](https://github.com/marswaveai/coli) を使用します：
+`TypeNo Agent` はローカル音声認識に [coli](https://github.com/marswaveai/coli) を使用します：
 
 ```bash
 npm install -g @marswave/coli
@@ -53,7 +56,7 @@ npm install -g @marswave/coli
 
 ### 初回起動
 
-TypeNo には一度だけ次の2つの権限が必要です：
+`TypeNo Agent` には一度だけ次の2つの権限が必要です：
 - **マイク** — 音声を録音するため
 - **アクセシビリティ** — テキストをアプリに貼り付けるため
 
@@ -68,21 +71,41 @@ scripts/generate_icon.sh
 scripts/build_app.sh
 ```
 
-アプリは `dist/TypeNo.app` に生成されます。権限を維持するため `/Applications/` に移動してください。
+アプリは `dist/TypeNo Agent.app` に生成されます。権限を維持するため `/Applications/` または `~/Applications/` に移動してください。
 
 ## 操作方法
 
 | 操作 | トリガー |
 |---|---|
-| 録音の開始/停止 | `Control` を短く押す（300ms以内、他のキーなし） |
+| 現在のデフォルトモードで録音開始/停止 | 左 `Option` を短く押す |
+| `口語整理` モードで録音開始/停止 | 左 `Control` を短く押す |
+| `Agent` モードで録音開始/停止 | 右 `Control` を短く押す |
 | 録音の開始/停止 | メニューバー → Record |
 | ファイルの文字起こし | `.m4a`/`.mp3`/`.wav`/`.aac` をメニューバーアイコンにドラッグ |
-| アップデート確認 | メニューバー → Check for Updates... |
+| デフォルトモードの選択 | メニューバー → Default Mode |
+| LLM provider の選択 | メニューバー → Provider |
+| 上流のコア更新を確認 | メニューバー → Check Upstream Updates... |
 | 終了 | メニューバー → Quit（`⌘Q`） |
 
-## 設計思想
+## 現在のモード
 
-TypeNo がやることはひとつだけ：音声 → テキスト → ペースト。余計な UI なし、設定なし、構成不要。最速のタイピングは、タイピングしないこと。
+- `普通`
+- `Agent`
+- `口語整理`
+- `中英夹杂`
+- `日漫中二`
+- `网络热梗`
+- `电影台词风`
+- `哲学社会学黑话`
+- `阴阳吐槽`
+
+`Agent` モードは、autonomous agent にそのまま貼り付けられる構造化タスク文を生成するためのモードです。
+
+## プロジェクトメモ
+
+- このリポジトリは upstream `TypeNo` 本体ではなく、`TypeNo Agent` fork を管理しています
+- バージョン履歴は `CHANGELOG.md` を参照してください
+- 現在の製品定義と保守方針は `UPDATE_MANUAL.md` を参照してください
 
 ## Star History
 
