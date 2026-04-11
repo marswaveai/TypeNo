@@ -217,12 +217,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkeyMonitor?.start()
 
-        // Silent update check on launch
-        Task {
-            if let release = await updateService.checkForUpdate() {
-                statusItemController?.setUpdateAvailable(release.version)
-            }
-        }
     }
 
     private func pollStatus() {
@@ -2506,11 +2500,9 @@ struct OverlayView: View {
 final class UpdateService: @unchecked Sendable {
     static let repoOwner = "marswaveai"
     static let repoName = "TypeNo"
-    static let assetName = "TypeNo.app.zip"
 
     struct ReleaseInfo {
         let version: String
-        let downloadURL: URL
     }
 
     enum CheckResult {
@@ -2518,13 +2510,6 @@ final class UpdateService: @unchecked Sendable {
         case upToDate
         case rateLimited
         case failed
-    }
-
-    func checkForUpdate() async -> ReleaseInfo? {
-        switch await checkForUpdateDetailed() {
-        case .updateAvailable(let info): return info
-        default: return nil
-        }
     }
 
     func checkForUpdateDetailed() async -> CheckResult {
@@ -2558,112 +2543,9 @@ final class UpdateService: @unchecked Sendable {
                 return .upToDate
             }
 
-            guard let asset = assets.first(where: { ($0["name"] as? String) == Self.assetName }),
-                  let downloadURLString = asset["browser_download_url"] as? String,
-                  let downloadURL = URL(string: downloadURLString) else {
-                return .failed
-            }
-
-            return .updateAvailable(ReleaseInfo(version: remoteVersion, downloadURL: downloadURL))
+            return .updateAvailable(ReleaseInfo(version: remoteVersion))
         } catch {
             return .failed
-        }
-    }
-
-    func downloadAndInstall(from downloadURL: URL, onProgress: @MainActor @Sendable (String) -> Void) async throws {
-        await onProgress(L("Downloading update...", "下载更新..."))
-
-        // Download zip to temp
-        let (zipURL, _) = try await URLSession.shared.download(from: downloadURL)
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("TypeNo-update-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-
-        let zipDest = tempDir.appendingPathComponent(Self.assetName)
-        if FileManager.default.fileExists(atPath: zipDest.path) {
-            try FileManager.default.removeItem(at: zipDest)
-        }
-        try FileManager.default.moveItem(at: zipURL, to: zipDest)
-
-        await onProgress(L("Installing update...", "安装更新..."))
-
-        // Use ditto --noqtn to unzip the app bundle — ditto is the macOS-native tool
-        // for copying app bundles and --noqtn prevents quarantine from being propagated
-        // to the extracted app (unlike /usr/bin/unzip which inherits quarantine).
-        let ditto = Process()
-        ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        ditto.arguments = ["-x", "-k", "--noqtn", zipDest.path, tempDir.path]
-        ditto.standardOutput = FileHandle.nullDevice
-        ditto.standardError = FileHandle.nullDevice
-        try ditto.run()
-        ditto.waitUntilExit()
-
-        guard ditto.terminationStatus == 0 else {
-            throw UpdateError.unzipFailed
-        }
-
-        let newAppURL = tempDir.appendingPathComponent("TypeNo.app")
-        guard FileManager.default.fileExists(atPath: newAppURL.path) else {
-            throw UpdateError.appNotFound
-        }
-
-        // Belt-and-suspenders: also remove quarantine recursively from the extracted app
-        let xattr = Process()
-        xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
-        xattr.arguments = ["-rd", "com.apple.quarantine", newAppURL.path]
-        xattr.standardOutput = FileHandle.nullDevice
-        xattr.standardError = FileHandle.nullDevice
-        try? xattr.run()
-        xattr.waitUntilExit()
-
-        // Replace current app
-        let currentAppURL = Bundle.main.bundleURL
-        let appParent = currentAppURL.deletingLastPathComponent()
-        let backupURL = appParent.appendingPathComponent("TypeNo.app.bak")
-
-        // Remove old backup if exists
-        if FileManager.default.fileExists(atPath: backupURL.path) {
-            try FileManager.default.removeItem(at: backupURL)
-        }
-
-        // Move current → backup
-        try FileManager.default.moveItem(at: currentAppURL, to: backupURL)
-
-        // Move new → current
-        do {
-            try FileManager.default.moveItem(at: newAppURL, to: currentAppURL)
-        } catch {
-            // Rollback if move fails
-            try? FileManager.default.moveItem(at: backupURL, to: currentAppURL)
-            throw UpdateError.replaceFailed
-        }
-
-        // Remove quarantine from the final location AFTER the move.
-        // Some macOS versions re-add quarantine during FileManager.moveItem;
-        // cleaning here ensures the relocated app is trusted when opened.
-        let xattrFinal = Process()
-        xattrFinal.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
-        xattrFinal.arguments = ["-cr", currentAppURL.path]   // -c clears all xattrs, -r recursive
-        xattrFinal.standardOutput = FileHandle.nullDevice
-        xattrFinal.standardError = FileHandle.nullDevice
-        try? xattrFinal.run()
-        xattrFinal.waitUntilExit()
-
-        // Clean up backup and temp
-        try? FileManager.default.removeItem(at: backupURL)
-        try? FileManager.default.removeItem(at: tempDir)
-
-        await onProgress("Restarting...")
-
-        // Relaunch: strip quarantine one final time right before open so
-        // any attribute reapplied between here and the actual launch is cleared.
-        let appPath = currentAppURL.path
-        let script = Process()
-        script.executableURL = URL(fileURLWithPath: "/bin/sh")
-        script.arguments = ["-c", "sleep 1 && xattr -cr \"\(appPath)\" && open \"\(appPath)\""]
-        try script.run()
-
-        await MainActor.run {
-            NSApp.terminate(nil)
         }
     }
 
@@ -2677,20 +2559,6 @@ final class UpdateService: @unchecked Sendable {
             if rv < cv { return false }
         }
         return false
-    }
-}
-
-enum UpdateError: LocalizedError {
-    case unzipFailed
-    case appNotFound
-    case replaceFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .unzipFailed: "Failed to unzip update"
-        case .appNotFound: "Update package is invalid"
-        case .replaceFailed: "Failed to replace app"
-        }
     }
 }
 
