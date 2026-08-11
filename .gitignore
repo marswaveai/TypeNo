@@ -3,6 +3,9 @@
 /Packages
 xcuserdata/
 DerivedData/
+
+# Local agent worktrees
+.claude/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
