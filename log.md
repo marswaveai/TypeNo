@@ -1,5 +1,9 @@
 # Change log
 
+## Unreleased
+- **Bug fix**: removed a duplicate text-content view from the compact overlay, which caused transcription results, live previews, errors, and notifications to render twice (fixes #50).
+- **Environment fix**: resolve the user's login-shell `PATH` for `coli` subprocesses so tools such as `ffmpeg` are found reliably from the GUI app.
+
 ## v1.4.0 — 2026-05-25
 - **Streaming live preview**: while recording, TypeNo feeds live microphone PCM into `coli asr-stream` for about-once-per-second overlay text preview. Final paste still uses full-file `coli asr` pass.
 - **New overlay design**: dark solid background (not translucent), fixed 360pt width, rounded rectangle, breathing dot indicator. Replaces old capsule-shaped overlay.
