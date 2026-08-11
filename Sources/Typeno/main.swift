@@ -2417,39 +2417,6 @@ struct OverlayView: View {
                         .truncationMode(.head)
                 }
             }
-
-            // Text content
-            Group {
-                if case .done(let text) = appState.phase {
-                    Text(text)
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                } else if case .recording = appState.phase {
-                    if appState.previewTranscript.isEmpty {
-                        Text(L("Listening...", "聆听中..."))
-                            .foregroundStyle(.white.opacity(0.35))
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                    } else {
-                        Text(appState.previewTranscript)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                    }
-                } else if case .error = appState.phase {
-                    Text(appState.phase.subtitle)
-                        .foregroundStyle(.red.opacity(0.9))
-                        .font(.system(size: 12))
-                        .lineLimit(8)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text(appState.phase.subtitle)
-                        .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
-            }
             .font(.system(size: 14))
 
             Spacer(minLength: 0)
