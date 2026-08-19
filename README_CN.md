@@ -125,7 +125,7 @@ TypeNo 只做一件事：语音 → 文字 → 粘贴。没有多余的 UI，没
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=marswaveai/TypeNo&type=Date)](https://star-history.com/#marswaveai/TypeNo&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=marswaveai/TypeNo&type=Date)](https://star-history.dera.page/#marswaveai/TypeNo&Date)
 
 ## 许可证
 
