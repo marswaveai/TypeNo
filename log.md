@@ -1,6 +1,6 @@
 # Change log
 
-## Unreleased
+## v1.4.1 — 2026-08-28
 - **Bug fix**: removed a duplicate text-content view from the compact overlay, which caused transcription results, live previews, errors, and notifications to render twice (fixes #50).
 - **Environment fix**: resolve the user's login-shell `PATH` for `coli` subprocesses so tools such as `ffmpeg` are found reliably from the GUI app.
 
