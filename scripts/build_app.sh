@@ -53,6 +53,9 @@ fi
 
 chmod +x "$MACOS_DIR/TypeNo"
 
+# Strip Finder/resource-fork metadata that blocks codesigning
+xattr -cr "$APP_DIR" 2>/dev/null || true
+
 # --- Code Signing ---
 CODE_SIGN_NAME="$(find_codesign_identity)"
 if [ -n "$CODE_SIGN_NAME" ]; then
