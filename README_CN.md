@@ -12,6 +12,8 @@
 
 特别感谢 [marswave ai 的 coli 项目](https://github.com/marswaveai/coli) 提供本地语音识别能力。
 
+> **维护说明**：TypeNo 目前处于低调维护模式。它依然完全可用并持续受支持——欢迎提交 bug 报告，macOS 大版本发布时我们也会做兼容性验证——但新功能开发暂时暂停。
+
 ## 使用方式
 
 1. **短按 Control** 开始录音

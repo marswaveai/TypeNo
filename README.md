@@ -12,6 +12,8 @@ Official website: [https://typeno.com](https://typeno.com)
 
 Special thanks to [marswave ai's coli project](https://github.com/marswaveai/coli) for powering local speech recognition.
 
+> **Maintenance note:** TypeNo is in low-key maintenance mode. It remains fully functional and supported — bug reports are welcome and macOS major releases will be verified — but active feature development is paused.
+
 ## How It Works
 
 1. **Short-press Control** to start recording
